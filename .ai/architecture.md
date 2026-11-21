@@ -31,21 +31,22 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
 - **Input Validation & Sanitization**:
   - Strict validation of inbound Kafka `AuditRecord` protobuf payloads (`tenant_id`, `seq_id`, `event_time`, `actor_context`), HTTP reconciliation parameters, and `pkg/redaction` PII/PHI masking before any storage write.
 - **Rate Limiting & Throttling (Backpressure)**:
-  - Caller-side bounded channels in `pkg/auditclient`: read-plane sheds non-essential metadata at $90\%$ fill; write-plane blocks and returns `HTTP 503` if Kafka is unavailable.
+  - Caller-side bounded channels in `pkg/auditclient`: read-plane sheds non-essential metadata at $90\%$ fill; write-plane blocks and returns a typed sentinel error (`ErrAuditUnavailable`) which HTTP caller services map to `HTTP 503`.
+  - Admin HTTP server rate-limits `POST /v1/reconcile/gaps` via token-bucket middleware to prevent ClickHouse/S3 scan amplification.
 - **Idempotency**:
-  - Partition-scoped monotonic `(tenant_id, partition, seq_id)` ordering and deterministic S3 object keys (`s3://vault/tenant_<id>/<hash>/year=YYYY/.../min_seq-max_seq.parquet`) prevent duplicate or out-of-order ledger corruption on consumer rebalances.
+  - Partition-scoped monotonic `(producer_id, tenant_id, partition, seq_id)` ordering, `ReplicatedReplacingMergeTree` in ClickHouse, and deterministic S3 object keys (`s3://vault/tenant_<id>/<hash>/year=YYYY/.../min_seq-max_seq.parquet`) prevent duplicate or out-of-order ledger corruption on consumer rebalances or 60s S3-hold replays.
 
 ### Layer 2: Data Persistence & State
 - **Database Migrations**:
-  - Versioned ClickHouse DDL schemas (`ReplicatedMergeTree` partitioned by `toYYYYMM(event_time)`, ordered by `(tenant_id, event_time, seq_id)`).
+  - Versioned ClickHouse DDL schemas (`ReplicatedReplacingMergeTree` partitioned by `toYYYYMM(event_time)`, ordered by `(tenant_id, event_time, producer_id, seq_id)`).
 - **Atomic Batch Commits (Zero Dual-Write Loss)**:
-  - Kafka consumer offsets are committed **only after** ClickHouse confirms RowBinary writes and S3 confirms WORM Parquet `PutObject` (or records are safely persisted to `mmap_wal` during declared downstream outages with offset advancement halted).
+  - Kafka consumer offsets are committed **only after** ClickHouse confirms RowBinary writes and S3 confirms WORM Parquet `PutObject`. During declared downstream outages (ClickHouse/S3), offset advancement halts and records spool to pod-local `mmap_wal` (`5 GiB` cap) for bounded retry without heap growth.
 - **Connection Pooling**:
   - ClickHouse native TCP connection pool (`internal/infrastructure/persistence/clickhouse/client.go`) and reused HTTP/2 S3 client transport.
 - **Spillover & Batch Bounds**:
   - Hot batch limit: `1,000 ms` or `2,500` records. Cold batch limit: `60 s` or `32 MiB`. Spillover cap: `5 GiB` NVMe `mmap_wal`.
 - **Resource Identification**:
-  - High-entropy ULIDs/UUIDs for `event_id` and `trace_id`; monotonic `uint64 seq_id` per `(tenant_id, partition)`.
+  - High-entropy ULIDs/UUIDs for `event_id` and `trace_id`; monotonic `uint64 seq_id` per `(producer_id, tenant_id, partition)` correlated with Kafka `partition_offset`.
 
 ### Layer 3: Architecture & Scale
 - **Asynchronous Task Queues & Workers**:

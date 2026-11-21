@@ -57,17 +57,22 @@ Executes `reconcile_partition_gaps.go` to compare `[min_seq, max_seq]` manifests
     "min_seq": 100000,
     "max_seq": 125000
   },
-  "gaps": [],
+  "gaps": [
+    {
+      "producer_id": "search-orch-7f9b",
+      "min_seq": 100420,
+      "max_seq": 100425,
+      "missing_in": "s3"
+    }
+  ],
   "status": "consistent"
 }
 ```
-- **Response `400 Bad Request`**:
-```json
-{
-  "error": "BAD_REQUEST",
-  "message": "Invalid tenant_id, negative partition, or from_seq > to_seq"
-}
-```
+- **Error Responses**:
+  - `400 Bad Request`: `{"error": "BAD_REQUEST", "message": "Invalid tenant_id, negative partition, or from_seq > to_seq"}`
+  - `401 Unauthorized` / `403 Forbidden`: `{"error": "UNAUTHORIZED", "message": "Missing or insufficient audit:reconcile scope"}`
+  - `429 Too Many Requests`: `{"error": "RATE_LIMITED", "message": "Reconciliation rate limit exceeded"}`
+  - `503 Service Unavailable`: `{"error": "STORAGE_UNAVAILABLE", "message": "ClickHouse or S3 metadata store temporarily unavailable"}`
 
 ---
 
@@ -107,13 +112,14 @@ message AccessTrace {
   repeated string chunk_ids = 2;
   bool cache_hit = 3;
   string embedding_model_version = 4;
+  repeated string document_versions = 5; // Immutable doc version lineage (v1..vn)
 }
 
 message AuditRecord {
   string event_id = 1;                   // ULID/UUID
   string trace_id = 2;
   string tenant_id = 3;
-  uint64 seq_id = 4;                     // Monotonic per (tenant_id, kafka_partition)
+  uint64 seq_id = 4;                     // Monotonic per (producer_id, tenant_id, kafka_partition)
   google.protobuf.Timestamp event_time = 5;
   PlaneType plane = 6;
   string action = 7;                     // e.g., "search.query", "document.upload", "acl.mutate"
@@ -123,6 +129,7 @@ message AuditRecord {
   bytes payload_redacted = 11;           // Sanitized/redacted metadata bytes
   uint32 prompt_tokens = 12;
   uint32 completion_tokens = 13;
+  string producer_id = 14;               // Unique caller pod/instance ID for multi-producer seq monotonicity
 }
 ```
 
@@ -130,11 +137,41 @@ message AuditRecord {
 
 ## 3. Downstream Persistence Contracts
 
-### ClickHouse Hot Tier (`ReplicatedMergeTree`)
+### ClickHouse Hot Tier (`ReplicatedReplacingMergeTree`)
 - **Ingestion Protocol**: Native TCP RowBinary stream (`1,000 ms` or `2,500` records; P99 $\le 2\text{ s}$).
-- **Table Partitioning & Ordering**:
-  - `PARTITION BY toYYYYMM(event_time)`
-  - `ORDER BY (tenant_id, event_time, seq_id)`
+- **Deduplication**: `ReplicatedReplacingMergeTree(ingested_at)` makes consumer-rebalance and 60s S3-hold replays idempotent across `(tenant_id, event_time, producer_id, seq_id)`.
+- **DDL**:
+```sql
+CREATE TABLE IF NOT EXISTS audit_compliance_records ON CLUSTER '{cluster}'
+(
+    event_id                 String,
+    trace_id                 String,
+    tenant_id                LowCardinality(String),
+    producer_id              LowCardinality(String),
+    kafka_partition          UInt16,
+    kafka_offset             UInt64,
+    seq_id                   UInt64,
+    event_time               DateTime64(3, 'UTC'),
+    ingested_at              DateTime64(3, 'UTC') DEFAULT now64(3),
+    plane                    Enum8('UNSPECIFIED' = 0, 'READ' = 1, 'WRITE' = 2),
+    action                   LowCardinality(String),
+    service_name             LowCardinality(String),
+    actor_id                 String,
+    auth_method              LowCardinality(String),
+    source_ip_hash           FixedString(64),
+    doc_ids                  Array(UInt32),
+    chunk_ids                Array(String),
+    document_versions        Array(String),
+    cache_hit                Bool,
+    embedding_model_version  LowCardinality(String),
+    payload_redacted         String,
+    prompt_tokens            UInt32,
+    completion_tokens        UInt32
+)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/audit_compliance_records', '{replica}', ingested_at)
+PARTITION BY toYYYYMM(event_time)
+ORDER BY (tenant_id, event_time, producer_id, seq_id);
+```
 
 ### AWS S3 WORM Cold Vault (Parquet + Object Lock)
 - **Flush Boundary**: `60 seconds` or `32 MiB` (P99 $\le 60\text{ s}$).
@@ -144,5 +181,7 @@ message AuditRecord {
   - `x-amz-object-lock-mode: COMPLIANCE`
   - `x-amz-object-lock-retain-until-date: <now + 7 years>`
   - `x-amz-server-side-encryption: aws:kms` (Customer-Managed Key + S3 Bucket Keys)
+- **Parquet Column Schema**:
+  - `event_id` (`BYTE_ARRAY/UTF8`), `trace_id` (`BYTE_ARRAY/UTF8`), `tenant_id` (`BYTE_ARRAY/UTF8`), `producer_id` (`BYTE_ARRAY/UTF8`), `kafka_partition` (`INT32`), `kafka_offset` (`INT64`), `seq_id` (`INT64` / uint64 bit-exact), `event_time_ms` (`INT64/TIMESTAMP_MILLIS`), `plane` (`INT32`), `action` (`BYTE_ARRAY/UTF8`), `service_name` (`BYTE_ARRAY/UTF8`), `actor_id` (`BYTE_ARRAY/UTF8`), `auth_method` (`BYTE_ARRAY/UTF8`), `source_ip_hash` (`BYTE_ARRAY/UTF8`), `doc_ids` (`LIST<INT32>`), `chunk_ids` (`LIST<BYTE_ARRAY>`), `document_versions` (`LIST<BYTE_ARRAY>`), `cache_hit` (`BOOLEAN`), `embedding_model_version` (`BYTE_ARRAY/UTF8`), `payload_redacted` (`BYTE_ARRAY`), `prompt_tokens` (`INT32`), `completion_tokens` (`INT32`).
 - **Parquet File Key-Value Metadata**:
-  - `tenant_id`, `kafka_partition`, `min_seq`, `max_seq`, `record_count`, `schema_version`
+  - `tenant_id`, `producer_id`, `kafka_partition`, `min_seq`, `max_seq`, `record_count`, `schema_version`

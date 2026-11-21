@@ -4,7 +4,7 @@
 
 - **Dual-Plane Ingestion Boundary**: Strictly isolate compliance ingestion (`audit-compliance-records` Kafka topic $\rightarrow$ ClickHouse + S3 WORM) from high-cardinality diagnostic traces (OpenTelemetry Collector $\rightarrow$ `rag-trace-collector-worker`). Never add OTel waterfall ingestion or UDS listeners to this daemon.
 - **Fail-Closed Write-Plane, Graceful Read-Plane & Downstream Resilience**:
-  - In `pkg/auditclient`: Write-plane mutations enforce synchronous `acks=all` Kafka queueing with bounded wait limits and return `HTTP 503` on broker unavailability. Read-plane audits queue non-blockingly and shed non-essential metadata at `90%` buffer fill while preserving the principal access event. Diagnostic `ring_buffer.go` safely drops spans under duress.
+  - In `pkg/auditclient`: Write-plane mutations enforce synchronous `acks=all` Kafka queueing with bounded wait limits and return a typed sentinel error (`ErrAuditUnavailable`) on broker unavailability (so HTTP caller services fail closed with `HTTP 503`). Read-plane audits queue non-blockingly and shed non-essential metadata at `90%` buffer fill while preserving the principal access event. Diagnostic `ring_buffer.go` safely drops spans under duress.
   - In `rag-telemetry-audit-daemon`: On ClickHouse or S3 outages (`503 SlowDown`, `500`), halt Kafka offset advancement, spill records to local NVMe `mmap_wal` (`5 GiB` cap), and retry with exponential backoff without growing container RSS past `1.5 GiB`.
 - **Root-Cause Focus**: Never mask race conditions or downstream stalls with arbitrary `time.Sleep` calls; use bounded `context.WithTimeout` deadlines, `sync.Pool` byte buffers, per-partition sequence tracking, and offset-commit-after-persist guarantees.
 
@@ -31,16 +31,16 @@
 
 1. **Byte-Pooled PII/PHI Redaction (`pkg/pool/byte_pool.go`, `pkg/redaction/`)**:
    - Use `sync.Pool` for reusable `[]byte` buffers; always reset slice lengths (`buf = buf[:0]`) before returning to the pool.
-   - Operate directly on `[]byte` using compiled Aho-Corasick patterns and pre-compiled regexes **without casting to Go `string` instances** until final persistence.
+   - Operate directly on `[]byte` using compiled Aho-Corasick patterns and pre-compiled regexes **without casting to Go `string` instances** until final persistence. Avoid `regexp.FindAllIndex` (which allocates `[][]int` per call); use iterative `FindIndex` loops or byte-slice scanners with stack/pooled scratch.
    - Amortized memory allocation budget MUST remain **$\le 128\text{ B/op}$** across variable-length JSON and natural language document chunks (`go test -bench=. -benchmem ./pkg/redaction/...`).
 2. **Partition-Scoped Monotonic Sequence Tracking (`internal/domain/entity/batch_manifest.go`)**:
-   - Track continuous sequence intervals (`[min_seq, max_seq]`) per `(tenant_id, kafka_partition)` and flag any sequence gap before committing to storage.
+   - Track continuous sequence intervals (`[min_seq, max_seq]`) per `(producer_id, tenant_id, kafka_partition)` and flag any sequence gap before committing to storage.
    - Write `[min_seq, max_seq]` directly into S3 Parquet object key-value metadata for `cmd/ledger-verify` and `reconcile_partition_gaps.go`.
 3. **Two-Tier Flush & Spillover Bounds**:
    - ClickHouse RowBinary: flush every `1,000 ms` or `2,500` records (P99 $\le 2\text{ s}$).
    - S3 WORM Parquet: flush every `60 s` or `32 MiB` (P99 $\le 60\text{ s}$).
    - Commit Kafka offsets **only after** both ClickHouse row writes and S3 object uploads succeed.
-   - NVMe `mmap_wal.go`: hard-capped at `5 GiB` on a `10 GiB` ephemeral `emptyDir` volume.
+   - NVMe `mmap_wal.go`: hard-capped at `5 GiB` on a `10 GiB` ephemeral `emptyDir` volume. Guard Linux `syscall.Mmap` behind `//go:build linux` with a portable file-backed fallback for Windows/macOS local tests, and isolate/annotate any `unsafe` slice header conversions for `gosec`.
 
 ---
 
