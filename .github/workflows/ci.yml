@@ -1,0 +1,211 @@
+name: CI - rag-telemetry-audit-daemon
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-typecheck:
+    name: lint-and-typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Go module presence
+        id: go_check
+        run: |
+          if [ -f "go.mod" ]; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Go 1.23+
+        if: steps.go_check.outputs.has_go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Verify gofmt -s formatting
+        if: steps.go_check.outputs.has_go == 'true'
+        run: |
+          UNFORMATTED=$(gofmt -s -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "ERROR: Unformatted Go files found:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run go vet
+        if: steps.go_check.outputs.has_go == 'true'
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        if: steps.go_check.outputs.has_go == 'true'
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Validate Protobuf contracts (buf lint)
+        run: |
+          if ls api/proto/v1/*.proto >/dev/null 2>&1; then
+            if command -v buf >/dev/null 2>&1; then
+              buf lint
+            else
+              echo "Proto files detected; buf not installed in runner, skipping buf lint."
+            fi
+          else
+            echo "No .proto files yet (pre-Phase 1); skipping proto lint."
+          fi
+
+  security-and-logging-audit:
+    name: security-and-logging-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Go module presence
+        id: go_check
+        run: |
+          if [ -f "go.mod" ]; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Go 1.23+
+        if: steps.go_check.outputs.has_go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Run govulncheck
+        if: steps.go_check.outputs.has_go == 'true'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Run gosec security scanner
+        if: steps.go_check.outputs.has_go == 'true'
+        uses: securego/gosec@master
+        with:
+          args: ./...
+
+      - name: Secured Logging Audit (Structured slog & Redaction Guard)
+        run: |
+          echo "Auditing production Go packages (cmd/, internal/, pkg/) for Secured Logging compliance..."
+          for dir in cmd internal pkg; do
+            if [ -d "$dir" ]; then
+              # 1. Disallow unstructured fmt.Print* or stdlib log.Print* in production packages
+              if grep -rnE --include="*.go" --exclude="*_test.go" '\b(fmt\.Print|fmt\.Printf|fmt\.Println|log\.Print|log\.Printf|log\.Println|log\.Fatal)\b' "$dir"; then
+                echo "ERROR: Unstructured logging detected in $dir/. Use log/slog structured JSON logging."
+                exit 1
+              fi
+
+              # 2. Disallow logging sensitive credentials, raw PII/PHI, or auth headers
+              if grep -rniE --include="*.go" --exclude="*_test.go" 'slog\.(Info|Warn|Error|Debug|Log).*(\bauthorization\b|\bbearer_token\b|\braw_payload\b|\braw_pii\b|\baws_secret\b|\bkms_key_material\b|\bclickhouse_password\b|\bsasl_password\b|\bdsn\b)' "$dir"; then
+                echo "ERROR: Potential unredacted sensitive field in slog call inside $dir/."
+                exit 1
+              fi
+            fi
+          done
+          echo "Secured Logging Audit passed."
+
+      - name: Verify Distroless Non-Root Container Configuration
+        run: |
+          if [ -f "deployments/docker/Dockerfile" ]; then
+            if ! grep -qE 'gcr\.io/distroless/static:nonroot|USER\s+(65532|nonroot)' deployments/docker/Dockerfile; then
+              echo "ERROR: Dockerfile must use gcr.io/distroless/static:nonroot or non-root UID 65532."
+              exit 1
+            fi
+          fi
+
+  openapi-and-doc-api-sync:
+    name: OpenAPI 3.1 & Doc API Contract Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify .ai/doc-api.md exists
+        run: |
+          if [ ! -f ".ai/doc-api.md" ]; then
+            echo "ERROR: .ai/doc-api.md is missing."
+            exit 1
+          fi
+
+      - name: Validate OpenAPI 3.1 specification (Spectral)
+        if: hashFiles('api/openapi/openapi.yaml') != ''
+        uses: stoplightio/spectral-action@v0.8.11
+        with:
+          file_glob: "api/openapi/openapi.yaml"
+
+      - name: Enforce Doc API & OpenAPI Sync on Contract Changes
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          CONTRACT_TOUCHED=$(echo "$CHANGED" | grep -E '^(cmd/|api/proto/|pkg/auditclient/|internal/infrastructure/transport/|internal/application/)' || true)
+          if [ -n "$CONTRACT_TOUCHED" ]; then
+            DOC_SYNCED=$(echo "$CHANGED" | grep -E '^(\.ai/doc-api\.md|api/openapi/openapi\.yaml)$' || true)
+            if [ -z "$DOC_SYNCED" ]; then
+              echo "ERROR: Contract/transport/application files changed without updating .ai/doc-api.md or api/openapi/openapi.yaml."
+              echo "Touched files:"
+              echo "$CONTRACT_TOUCHED"
+              exit 1
+            fi
+          fi
+          echo "OpenAPI 3.1 & Doc API Contract Sync check passed."
+
+  test-suites:
+    name: test-suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Go module presence
+        id: go_check
+        run: |
+          if [ -f "go.mod" ]; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Go 1.23+
+        if: steps.go_check.outputs.has_go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Run unit & race-detector test suites
+        if: steps.go_check.outputs.has_go == 'true'
+        run: |
+          go test -v -race -count=1 ./pkg/... ./internal/... ./cmd/... $( [ -d test/unit ] && echo ./test/unit/... )
+
+      - name: Run redaction memory allocation benchmark (<= 128 B/op target)
+        if: steps.go_check.outputs.has_go == 'true' && hashFiles('pkg/redaction/*_test.go') != ''
+        run: |
+          go test -run=^$ -bench=. -benchmem ./pkg/redaction/...
