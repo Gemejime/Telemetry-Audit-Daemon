@@ -117,7 +117,7 @@ jobs:
               fi
 
               # 2. Disallow logging sensitive credentials, raw PII/PHI, or auth headers
-              if grep -rniE --include="*.go" --exclude="*_test.go" 'slog\.(Info|Warn|Error|Debug|Log).*(\bauthorization\b|\bbearer_token\b|\braw_payload\b|\braw_pii\b|\baws_secret\b|\bkms_key_material\b|\bclickhouse_password\b|\bsasl_password\b|\bdsn\b)' "$dir"; then
+              if grep -rniE --include="*.go" --exclude="*_test.go" 'slog\.(Info|Warn|Error|Debug|Log)(Context)?.*(\bauthorization\b|\bbearer_token\b|\braw_payload\b|\braw_pii\b|\baws_secret\b|\bkms_key_material\b|\bclickhouse_password\b|\bsasl_password\b|\bdsn\b)' "$dir"; then
                 echo "ERROR: Potential unredacted sensitive field in slog call inside $dir/."
                 exit 1
               fi
@@ -165,7 +165,7 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
-          CONTRACT_TOUCHED=$(echo "$CHANGED" | grep -E '^(cmd/|api/proto/|pkg/auditclient/|internal/infrastructure/transport/|internal/application/)' || true)
+          CONTRACT_TOUCHED=$(echo "$CHANGED" | grep -E '^(cmd/|api/proto/|pkg/auditclient/|internal/domain/|internal/infrastructure/persistence/|internal/infrastructure/transport/|internal/application/)' || true)
           if [ -n "$CONTRACT_TOUCHED" ]; then
             DOC_SYNCED=$(echo "$CHANGED" | grep -E '^(\.ai/doc-api\.md|api/openapi/openapi\.yaml)$' || true)
             if [ -z "$DOC_SYNCED" ]; then
