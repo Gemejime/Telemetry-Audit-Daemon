@@ -62,9 +62,9 @@ func TestIntegration_EndToEndKafkaClickHouseS3WORMAndRebalance(t *testing.T) {
 	const (
 		topic       = "audit-compliance-records"
 		bucket      = "rag-audit-worm-it"
-		tenantID    = "tenant-it-01"
 		totalEvents = 50_000
 	)
+	tenantID := fmt.Sprintf("tenant-it-%d", time.Now().UnixNano())
 
 	// 1. Ensure Kafka topic exists with 8 partitions.
 	kcl, err := kgo.NewClient(kgo.SeedBrokers(strings.Split(kafkaBroker, ",")...))
@@ -218,7 +218,7 @@ func TestIntegration_EndToEndKafkaClickHouseS3WORMAndRebalance(t *testing.T) {
 			TraceId:     fmt.Sprintf("it-tr-%d", i),
 			TenantId:    tenantID,
 			EventTime:   timestamppb.Now(),
-			Plane:       auditv1.PlaneType_PLANE_TYPE_READ,
+			Plane:       auditv1.PlaneType_PLANE_TYPE_WRITE,
 			Action:      "search.query",
 			ServiceName: "rag-search-orchestrator",
 			Actor: &auditv1.ActorContext{
@@ -261,13 +261,16 @@ func TestIntegration_EndToEndKafkaClickHouseS3WORMAndRebalance(t *testing.T) {
 					Bucket: aws.String(bucket),
 					Key:    objs.Contents[0].Key,
 				})
-				if hErr != nil || head.ObjectLockMode != types.ObjectLockModeCompliance {
-					t.Fatalf("expected S3 ObjectLockMode COMPLIANCE, got %v (err=%v)", head.ObjectLockMode, hErr)
+				if hErr != nil {
+					t.Fatalf("HeadObject failed for %s: %v", aws.ToString(objs.Contents[0].Key), hErr)
 				}
+				if head.ObjectLockMode != types.ObjectLockModeCompliance {
+					t.Fatalf("expected S3 ObjectLockMode COMPLIANCE, got %v", head.ObjectLockMode)
+				}
+				_ = entity.PlaneRead
+				_ = proto.Marshal
+				return
 			}
-			_ = entity.PlaneRead
-			_ = proto.Marshal
-			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

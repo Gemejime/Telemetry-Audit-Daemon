@@ -17,7 +17,7 @@ This document is the authoritative specification for all public and internal int
 | Method | Endpoint | Description | Auth Scope |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/healthz` | Kubernetes Liveness Probe | Public |
-| `GET` | `/ready` | Kubernetes Readiness Probe (gated on Kafka consumer group health & drain state) | Public |
+| `GET` | `/ready` | Kubernetes Readiness Probe (gated on drain state, Kafka consumer group health & ClickHouse `PingClickHouse` health) | Public |
 | `GET` | `/metrics` | Prometheus Metrics Scrape Endpoint (served on dedicated `METRICS_ADDR`, e.g. `:9090`, when configured) | Public / Ops |
 | `POST` | `/v1/reconcile/gaps` | Trigger partition sequence `[min_seq, max_seq]` gap reconciliation across ClickHouse & S3 WORM | `audit:reconcile` |
 | `GET` | `/openapi.yaml` | Raw OpenAPI 3.1 YAML specification | Public |
@@ -29,7 +29,7 @@ This document is the authoritative specification for all public and internal int
 
 #### 1. `GET /healthz`, `GET /ready`, `GET /metrics`
 - `GET /healthz` $\rightarrow$ `200 OK` `{"status": "alive"}`
-- `GET /ready` $\rightarrow$ `200 OK` `{"status": "ready", "checks": {"kafka_consumer": "ok", "clickhouse": "ok", "wal_spillover_active": false}}` or `503 Service Unavailable` (`{"status": "draining"}` during `SIGTERM` shutdown, or `{"status": "not_ready", "checks": {...}}` when Kafka consumer health fails).
+- `GET /ready` $\rightarrow$ `200 OK` `{"status": "ready", "checks": {"kafka_consumer": "ok", "clickhouse": "ok", "wal_spillover_active": false}}` or `503 Service Unavailable` (`{"status": "draining"}` during `SIGTERM` shutdown, or `{"status": "not_ready", "checks": {...}}` when Kafka consumer health or ClickHouse `PingClickHouse` health fails).
 - `GET /metrics` $\rightarrow$ Prometheus exposition format (`text/plain; version=0.0.4`). Exposes `audit_records_consumed_total`, `audit_consumer_lag_records`, `audit_hot_persist_duration_seconds`, `audit_cold_flush_duration_seconds`, `audit_caller_dropped_records_total`, `audit_wal_spillover_active`, `audit_s3_upload_errors_total`, `audit_s3_interval_overlaps_total`, `audit_malformed_records_total`, and `audit_sequence_gaps_total`. When `METRICS_ADDR` (e.g., `:9090`) is set, `/metrics` is served exclusively on that dedicated port for Kubernetes `NetworkPolicy` isolation.
 
 #### 2. `POST /v1/reconcile/gaps`

@@ -91,6 +91,7 @@ Implement **Phase 4: Chaos Testing & Production Rollout (Weeks 7–8)** from [`.
 3. `govulncheck ./...` and `gosec ./...`
 4. `npx --yes @stoplight/spectral-cli@6.11.1 lint --ruleset .spectral.yaml api/openapi/openapi.yaml`
 5. `go test -v -count=1 ./pkg/... ./internal/... ./cmd/... ./test/unit/... ./test/chaos/...` (and `-race` in CI / Linux)
-6. `go test -v -count=1 ./test/performance/...` (without `-race`, confirming $\ge 35,000\text{ events/sec}$ and RSS within ceiling)
-7. `go test -run=^$ -bench=. -benchmem ./pkg/redaction/...` (confirming $\le 128\text{ B/op}$)
-8. Verify Dockerfile non-root/distroless compliance (`gcr.io/distroless/static:nonroot`, UID `65532`), validate Helm templates (`helm lint` / `helm template` if `helm` is installed), update `.ai/progress-tracker.md`, and commit in $\ge 2$ conventional git commits.
+6. `KAFKA_BROKERS=... CLICKHOUSE_ADDR=... S3_ENDPOINT=... go test -v -tags=integration -count=1 ./test/integration/...` (against running Kafka, ClickHouse, and LocalStack S3/KMS containers for cross-tier persistence and rebalance checks)
+7. `go test -v -count=1 ./test/performance/...` (without `-race`, confirming $\ge 35,000\text{ events/sec}$ and RSS within ceiling)
+8. `go test -run=^$ -bench=. -benchmem ./pkg/redaction/...` (confirming $\le 128\text{ B/op}$)
+9. Verify Dockerfile non-root/distroless compliance (`gcr.io/distroless/static:nonroot`, UID `65532`), validate Helm templates (`helm lint` / `helm template` if `helm` is installed), update `.ai/progress-tracker.md`, and commit in $\ge 2$ conventional git commits.

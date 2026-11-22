@@ -17,10 +17,13 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/twmb/franz-go/pkg/kgo"
+
 	auditv1 "rag-telemetry-audit-daemon/api/proto/v1"
 	"rag-telemetry-audit-daemon/internal/application/command"
 	"rag-telemetry-audit-daemon/internal/domain/entity"
 	"rag-telemetry-audit-daemon/internal/domain/repository"
+	"rag-telemetry-audit-daemon/internal/infrastructure/kafka"
 	"rag-telemetry-audit-daemon/internal/infrastructure/observability"
 	"rag-telemetry-audit-daemon/internal/infrastructure/persistence/disk"
 	"rag-telemetry-audit-daemon/pkg/auditclient"
@@ -285,7 +288,7 @@ func TestChaos_ClickHouseFailoverHaltsWatermarkAndRecovers(t *testing.T) {
 	}
 }
 
-func TestChaos_PartitionRebalancePartialFailureSafety(t *testing.T) {
+func TestChaos_PartitionFlushPartialFailureSafety(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	wal, err := disk.NewMmapWAL(t.TempDir(), 64*1024*1024, 4*1024*1024, logger)
@@ -335,6 +338,96 @@ func TestChaos_PartitionRebalancePartialFailureSafety(t *testing.T) {
 	}
 	if cold.count() != 40 {
 		t.Fatalf("expected 40 cold records across both partitions, got %d", cold.count())
+	}
+}
+
+func TestChaos_ConsumerGroupRebalanceCommitSafety(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	wal, err := disk.NewMmapWAL(t.TempDir(), 64*1024*1024, 4*1024*1024, logger)
+	if err != nil {
+		t.Fatalf("NewMmapWAL: %v", err)
+	}
+	defer func() { _ = wal.Close() }()
+
+	hot := newChaosHotStore()
+	cold := newChaosColdStore()
+	cold.setPartitionErr(2, errors.New("broker rebalance / transient s3 timeout"))
+
+	hotFlusher := command.NewHotFlusher(hot, 1000, time.Minute)
+	coldFlusher := command.NewColdFlusher(cold, 100*1024*1024, time.Minute, 2)
+	proc := command.NewProcessKafkaBatch(redaction.NewEngine(nil), nil, hotFlusher, coldFlusher, hot, cold, wal, logger, nil)
+
+	var commitMu sync.Mutex
+	committed := make(map[int32]int64)
+	cg, err := kafka.NewConsumerGroup(kafka.ConsumerConfig{
+		Brokers:     []string{"127.0.0.1:9092"},
+		Topic:       kafka.DefaultTopic,
+		GroupID:     "chaos-rebalance-group",
+		Processor:   proc,
+		HotFlusher:  hotFlusher,
+		ColdFlusher: coldFlusher,
+		WAL:         wal,
+		Logger:      logger,
+		CommitFunc: func(_ context.Context, offsets map[string]map[int32]kgo.EpochOffset) error {
+			commitMu.Lock()
+			defer commitMu.Unlock()
+			for _, parts := range offsets {
+				for p, eo := range parts {
+					if eo.Offset > committed[p] {
+						committed[p] = eo.Offset
+					}
+				}
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewConsumerGroup: %v", err)
+	}
+	defer cg.Close()
+
+	var combined []command.RawKafkaRecord
+	combined = append(combined, makeRawKafkaBatch("tenant-reb-1", 1, 1, 20)...)
+	combined = append(combined, makeRawKafkaBatch("tenant-reb-2", 2, 1, 20)...)
+	if err := proc.Handle(ctx, combined); err != nil {
+		t.Fatalf("Handle buffered: %v", err)
+	}
+
+	// Revoke partitions 1 and 2: partition 1 flushes cleanly, partition 2 fails cold flush -> spills to WAL.
+	cg.RevokePartitions(ctx, []int32{1, 2})
+
+	commitMu.Lock()
+	p2BeforeRecovery := committed[2]
+	commitMu.Unlock()
+	if p2BeforeRecovery != 0 {
+		t.Fatalf("partition 2 offset must NOT commit while unresolved in WAL, got %d", p2BeforeRecovery)
+	}
+
+	// Recover S3, drain WAL, process a post-recovery record on partition 2, and commit safe offsets.
+	cold.setPartitionErr(2, nil)
+	for wal.IsSpilloverActive() {
+		if _, err := proc.DrainWALOnce(ctx, 50); err != nil {
+			t.Fatalf("DrainWALOnce: %v", err)
+		}
+	}
+	if cold.count() != 40 {
+		t.Fatalf("expected 40 cold records after WAL drain, got %d", cold.count())
+	}
+	if err := proc.Handle(ctx, makeRawKafkaBatch("tenant-reb-2", 2, 21, 1)); err != nil {
+		t.Fatalf("Handle post-recovery: %v", err)
+	}
+	if err := proc.FlushPartition(ctx, 2); err != nil {
+		t.Fatalf("FlushPartition(2) post-recovery: %v", err)
+	}
+	cg.CommitSafeOffsets(ctx)
+
+	commitMu.Lock()
+	p1After := committed[1]
+	p2After := committed[2]
+	commitMu.Unlock()
+	if p1After != 20 || p2After != 21 {
+		t.Fatalf("expected committed offsets p1=20 p2=21 after recovery, got p1=%d p2=%d", p1After, p2After)
 	}
 }
 

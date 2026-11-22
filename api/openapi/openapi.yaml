@@ -37,8 +37,9 @@ paths:
       operationId: getReady
       summary: Kubernetes readiness probe
       description: >
-        Returns 200 OK when the Kafka consumer group is healthy and not draining.
-        Returns 503 Service Unavailable during SIGTERM drain or when Kafka consumer health fails.
+        Returns 200 OK when the daemon is not draining, the Kafka consumer group is healthy,
+        and ClickHouse health (checked by PingClickHouse) succeeds.
+        Returns 503 Service Unavailable during SIGTERM drain or when Kafka consumer or ClickHouse health fails.
       tags:
         - Probes
       responses:
@@ -49,7 +50,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ReadyResponse"
         "503":
-          description: Daemon is draining or Kafka consumer health check failed
+          description: Daemon is draining, Kafka consumer health check failed, or ClickHouse health check failed
           content:
             application/json:
               schema:
