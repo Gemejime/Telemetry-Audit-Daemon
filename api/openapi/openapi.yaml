@@ -58,7 +58,11 @@ paths:
     get:
       operationId: getMetrics
       summary: Prometheus metrics scrape endpoint
-      description: Exposes Prometheus text exposition metrics for audit ingestion, lag, persistence latency, and spillover state.
+      description: >
+        Exposes Prometheus text exposition metrics for audit ingestion, lag, persistence latency,
+        spillover state, and sequence gap counts (audit_sequence_gaps_total). In Kubernetes
+        deployments with METRICS_ADDR=:9090, this endpoint is served exclusively on the dedicated
+        metrics listener.
       tags:
         - Observability
       responses:

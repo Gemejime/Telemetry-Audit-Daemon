@@ -185,3 +185,37 @@ func TestReconcileGapsEndpoint_AuthTenantIsolationAndRateLimit(t *testing.T) {
 		t.Fatalf("expected 429 on 5th request, got %d", rec.Code)
 	}
 }
+
+func TestDedicatedMetricsPortIsolation(t *testing.T) {
+	metrics := observability.NewMetrics()
+	metrics.IncSequenceGaps(2)
+
+	srv := NewServer(ServerConfig{
+		Addr:          ":8080",
+		MetricsAddr:   ":9090",
+		HealthChecker: &stubReadiness{kafkaOK: true},
+		Metrics:       metrics,
+	})
+
+	// Main admin/probe handler must NOT expose /metrics when MetricsAddr is configured.
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for /metrics on main port when MetricsAddr is set, got %d", rec.Code)
+	}
+
+	// Dedicated metrics handler must serve /metrics including audit_sequence_gaps_total.
+	if srv.MetricsHandler() == nil {
+		t.Fatal("expected non-nil MetricsHandler")
+	}
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec = httptest.NewRecorder()
+	srv.MetricsHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on dedicated metrics port, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "audit_sequence_gaps_total 2") {
+		t.Fatalf("expected audit_sequence_gaps_total 2 in metrics output, got: %s", rec.Body.String())
+	}
+}

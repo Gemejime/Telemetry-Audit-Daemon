@@ -136,6 +136,9 @@ func (p *ProcessKafkaBatch) Handle(ctx context.Context, records []RawKafkaRecord
 	manifests := p.seqTrack.TrackBatch(entries)
 	for i := range manifests {
 		m := &manifests[i]
+		if len(m.Gaps) > 0 {
+			p.metrics.IncSequenceGaps(len(m.Gaps))
+		}
 		for _, g := range m.Gaps {
 			p.logger.Warn("sequence gap detected in ingested batch",
 				slog.String("tenant_id", g.Key.TenantID),

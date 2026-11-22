@@ -20,6 +20,7 @@ type Metrics struct {
 	S3UploadErrorsTotal       *prometheus.CounterVec
 	S3IntervalOverlapsTotal   prometheus.Counter
 	MalformedRecordsTotal     prometheus.Counter
+	SequenceGapsTotal         prometheus.Counter
 }
 
 // NewMetrics registers all daemon Prometheus collectors into a dedicated registry.
@@ -66,6 +67,10 @@ func NewMetrics() *Metrics {
 			Name: "audit_malformed_records_total",
 			Help: "Total malformed or poison-pill Kafka audit records skipped.",
 		}),
+		SequenceGapsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "audit_sequence_gaps_total",
+			Help: "Total partition sequence gaps detected during ingestion or cross-tier reconciliation.",
+		}),
 	}
 
 	reg.MustRegister(
@@ -78,6 +83,7 @@ func NewMetrics() *Metrics {
 		m.S3UploadErrorsTotal,
 		m.S3IntervalOverlapsTotal,
 		m.MalformedRecordsTotal,
+		m.SequenceGapsTotal,
 	)
 
 	return m
@@ -157,4 +163,12 @@ func (m *Metrics) IncMalformedRecords(count int) {
 		return
 	}
 	m.MalformedRecordsTotal.Add(float64(count))
+}
+
+// IncSequenceGaps increments audit_sequence_gaps_total.
+func (m *Metrics) IncSequenceGaps(count int) {
+	if m == nil || count <= 0 {
+		return
+	}
+	m.SequenceGapsTotal.Add(float64(count))
 }

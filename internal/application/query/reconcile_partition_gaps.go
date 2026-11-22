@@ -205,6 +205,7 @@ func (q *ReconcilePartitionGaps) Execute(ctx context.Context, req ReconcileReque
 	status := "consistent"
 	if len(gaps) > 0 {
 		status = "inconsistent"
+		q.metrics.IncSequenceGaps(len(gaps))
 	}
 
 	return ReconcileResponse{

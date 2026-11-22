@@ -69,7 +69,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health.Healthz)
 	mux.HandleFunc("GET /ready", health.Ready)
-	if cfg.Metrics != nil {
+	if cfg.Metrics != nil && cfg.MetricsAddr == "" {
 		mux.Handle("GET /metrics", cfg.Metrics.Handler())
 	}
 	mux.HandleFunc("POST /v1/reconcile/gaps", s.handleReconcileGaps)
@@ -102,6 +102,14 @@ func NewServer(cfg ServerConfig) *Server {
 // Handler returns the main HTTP handler (useful for httptest in unit tests).
 func (s *Server) Handler() http.Handler {
 	return s.mainServer.Handler
+}
+
+// MetricsHandler returns the dedicated metrics HTTP handler when MetricsAddr is configured, or nil otherwise.
+func (s *Server) MetricsHandler() http.Handler {
+	if s.metricsServer == nil {
+		return nil
+	}
+	return s.metricsServer.Handler
 }
 
 // Start launches the HTTP server(s) in background goroutines.
