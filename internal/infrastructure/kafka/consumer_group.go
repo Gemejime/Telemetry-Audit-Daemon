@@ -19,40 +19,49 @@ import (
 )
 
 const (
-	DefaultTopic            = "audit-compliance-records"
-	DefaultGroupID          = "rag-telemetry-audit-daemon"
-	DefaultWALDrainInterval = 2 * time.Second
-	DefaultWALDrainBatch    = 512
+	DefaultTopic             = "audit-compliance-records"
+	DefaultGroupID           = "rag-telemetry-audit-daemon"
+	DefaultWALDrainInterval  = 2 * time.Second
+	DefaultWALDrainBatch     = 512
+	DefaultLagReportInterval = 15 * time.Second
 )
+
+// CommitOffsetsFunc commits safe offsets to Kafka (overridable in tests).
+type CommitOffsetsFunc func(ctx context.Context, offsets map[string]map[int32]kgo.EpochOffset) error
 
 // ConsumerConfig configures the stateless Kafka compliance consumer group.
 type ConsumerConfig struct {
-	Brokers          []string
-	Topic            string
-	GroupID          string
-	WALDrainInterval time.Duration
-	WALDrainBatch    int
-	Processor        *command.ProcessKafkaBatch
-	HotFlusher       *command.HotFlusher
-	ColdFlusher      *command.ColdFlusher
-	WAL              repository.WALPort
-	Logger           *slog.Logger
-	Metrics          *observability.Metrics
+	Brokers           []string
+	Topic             string
+	GroupID           string
+	WALDrainInterval  time.Duration
+	WALDrainBatch     int
+	LagReportInterval time.Duration
+	CommitFunc        CommitOffsetsFunc
+	Processor         *command.ProcessKafkaBatch
+	HotFlusher        *command.HotFlusher
+	ColdFlusher       *command.ColdFlusher
+	WAL               repository.WALPort
+	Logger            *slog.Logger
+	Metrics           *observability.Metrics
 }
 
 // ConsumerGroup consumes audit-compliance-records, coordinates hot/cold flushes,
 // halts offset commits during WAL spillover, and commits offsets only after both tiers persist.
 type ConsumerGroup struct {
-	client           *kgo.Client
-	topic            string
-	walDrainInterval time.Duration
-	walDrainBatch    int
-	processor        *command.ProcessKafkaBatch
-	hot              *command.HotFlusher
-	cold             *command.ColdFlusher
-	wal              repository.WALPort
-	logger           *slog.Logger
-	metrics          *observability.Metrics
+	client            *kgo.Client
+	topic             string
+	groupID           string
+	walDrainInterval  time.Duration
+	walDrainBatch     int
+	lagReportInterval time.Duration
+	commitFunc        CommitOffsetsFunc
+	processor         *command.ProcessKafkaBatch
+	hot               *command.HotFlusher
+	cold              *command.ColdFlusher
+	wal               repository.WALPort
+	logger            *slog.Logger
+	metrics           *observability.Metrics
 
 	mu              sync.Mutex
 	assigned        map[int32]bool
@@ -83,22 +92,28 @@ func NewConsumerGroup(cfg ConsumerConfig) (*ConsumerGroup, error) {
 	if cfg.WALDrainBatch <= 0 {
 		cfg.WALDrainBatch = DefaultWALDrainBatch
 	}
+	if cfg.LagReportInterval <= 0 {
+		cfg.LagReportInterval = DefaultLagReportInterval
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 
 	cg := &ConsumerGroup{
-		topic:            cfg.Topic,
-		walDrainInterval: cfg.WALDrainInterval,
-		walDrainBatch:    cfg.WALDrainBatch,
-		processor:        cfg.Processor,
-		hot:              cfg.HotFlusher,
-		cold:             cfg.ColdFlusher,
-		wal:              cfg.WAL,
-		logger:           cfg.Logger,
-		metrics:          cfg.Metrics,
-		assigned:         make(map[int32]bool),
-		committedOffset:  make(map[int32]int64),
+		topic:             cfg.Topic,
+		groupID:           cfg.GroupID,
+		walDrainInterval:  cfg.WALDrainInterval,
+		walDrainBatch:     cfg.WALDrainBatch,
+		lagReportInterval: cfg.LagReportInterval,
+		commitFunc:        cfg.CommitFunc,
+		processor:         cfg.Processor,
+		hot:               cfg.HotFlusher,
+		cold:              cfg.ColdFlusher,
+		wal:               cfg.WAL,
+		logger:            cfg.Logger,
+		metrics:           cfg.Metrics,
+		assigned:          make(map[int32]bool),
+		committedOffset:   make(map[int32]int64),
 	}
 
 	client, err := kgo.NewClient(
@@ -134,9 +149,11 @@ func (cg *ConsumerGroup) Run(ctx context.Context) error {
 	hotTicker := time.NewTicker(hotInterval)
 	coldTicker := time.NewTicker(coldInterval)
 	walTicker := time.NewTicker(cg.walDrainInterval)
+	lagTicker := time.NewTicker(cg.lagReportInterval)
 	defer hotTicker.Stop()
 	defer coldTicker.Stop()
 	defer walTicker.Stop()
+	defer lagTicker.Stop()
 
 	bgCtx, bgCancel := context.WithCancel(ctx)
 	defer bgCancel()
@@ -170,6 +187,8 @@ func (cg *ConsumerGroup) Run(ctx context.Context) error {
 					cg.resumeIfPaused()
 					cg.commitSafeOffsets(bgCtx)
 				}
+			case <-lagTicker.C:
+				cg.reportConsumerLag(bgCtx)
 			}
 		}
 	}()
@@ -369,9 +388,13 @@ func (cg *ConsumerGroup) commitSafeOffsets(ctx context.Context) {
 	offsets[cg.topic] = topicOffsets
 
 	var commitErr error
-	cg.client.CommitOffsetsSync(ctx, offsets, func(_ *kgo.Client, _ *kmsg.OffsetCommitRequest, _ *kmsg.OffsetCommitResponse, err error) {
-		commitErr = err
-	})
+	if cg.commitFunc != nil {
+		commitErr = cg.commitFunc(ctx, offsets)
+	} else {
+		cg.client.CommitOffsetsSync(ctx, offsets, func(_ *kgo.Client, _ *kmsg.OffsetCommitRequest, _ *kmsg.OffsetCommitResponse, err error) {
+			commitErr = err
+		})
+	}
 	if commitErr != nil {
 		cg.logger.Warn("failed to commit kafka offsets", slog.String("error", commitErr.Error()))
 		return
@@ -382,4 +405,111 @@ func (cg *ConsumerGroup) commitSafeOffsets(ctx context.Context) {
 		cg.committedOffset[p32] = eo.Offset
 	}
 	cg.mu.Unlock()
+}
+
+// RevokePartitions triggers partition revocation handling (flush + safe offset commit).
+func (cg *ConsumerGroup) RevokePartitions(ctx context.Context, partitions []int32) {
+	cg.onRevoked(ctx, cg.client, map[string][]int32{cg.topic: partitions})
+}
+
+// CommitSafeOffsets commits offsets that have been durably persisted to both hot and cold tiers.
+func (cg *ConsumerGroup) CommitSafeOffsets(ctx context.Context) {
+	cg.commitSafeOffsets(ctx)
+}
+
+// Close closes the underlying Kafka client.
+func (cg *ConsumerGroup) Close() {
+	if cg.client != nil {
+		cg.client.Close()
+	}
+}
+
+func (cg *ConsumerGroup) reportConsumerLag(ctx context.Context) {
+	if cg.metrics == nil || cg.client == nil {
+		return
+	}
+
+	cg.mu.Lock()
+	parts := make([]int32, 0, len(cg.assigned))
+	for p := range cg.assigned {
+		parts = append(parts, p)
+	}
+	cg.mu.Unlock()
+
+	if len(parts) == 0 {
+		cg.metrics.SetConsumerLag(0)
+		return
+	}
+
+	lagCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	fetchReq := kmsg.NewPtrOffsetFetchRequest()
+	fetchReq.Group = cg.groupID
+	fetchReq.Topics = []kmsg.OffsetFetchRequestTopic{{
+		Topic:      cg.topic,
+		Partitions: parts,
+	}}
+	fetchResp, err := fetchReq.RequestWith(lagCtx, cg.client)
+	if err != nil {
+		cg.logger.Debug("failed to fetch consumer group offsets for lag", slog.String("error", err.Error()))
+		return
+	}
+
+	committed := make(map[int32]int64, len(parts))
+	for _, t := range fetchResp.Topics {
+		if t.Topic != cg.topic {
+			continue
+		}
+		for _, p := range t.Partitions {
+			if p.ErrorCode == 0 {
+				committed[p.Partition] = p.Offset
+			}
+		}
+	}
+
+	listParts := make([]kmsg.ListOffsetsRequestTopicPartition, 0, len(parts))
+	for _, p := range parts {
+		listParts = append(listParts, kmsg.ListOffsetsRequestTopicPartition{
+			Partition: p,
+			Timestamp: -1,
+		})
+	}
+	listReq := kmsg.NewPtrListOffsetsRequest()
+	listReq.ReplicaID = -1
+	listReq.Topics = []kmsg.ListOffsetsRequestTopic{{
+		Topic:      cg.topic,
+		Partitions: listParts,
+	}}
+
+	shards := cg.client.RequestSharded(lagCtx, listReq)
+	var totalLag int64
+	for _, shard := range shards {
+		if shard.Err != nil {
+			cg.logger.Debug("failed to list partition end offsets for lag", slog.String("error", shard.Err.Error()))
+			return
+		}
+		lor, ok := shard.Resp.(*kmsg.ListOffsetsResponse)
+		if !ok {
+			continue
+		}
+		for _, t := range lor.Topics {
+			if t.Topic != cg.topic {
+				continue
+			}
+			for _, p := range t.Partitions {
+				if p.ErrorCode != 0 || p.Offset < 0 {
+					continue
+				}
+				comm, hasComm := committed[p.Partition]
+				if !hasComm || comm < 0 {
+					totalLag += p.Offset
+				} else if p.Offset > comm {
+					totalLag += p.Offset - comm
+				}
+			}
+		}
+	}
+
+	cg.metrics.SetConsumerLag(float64(totalLag))
 }

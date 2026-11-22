@@ -40,7 +40,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	metrics := observability.NewMetrics()
+	metrics := observability.NewMetricsWithTenantAllowlist(splitCSV(os.Getenv("METRICS_TENANT_ALLOWLIST")))
 	bp := pool.NewBytePool(pool.DefaultInitialCap, pool.DefaultMaxCap)
 	redactor := redaction.NewEngine(bp)
 	seqTracker := entity.NewSequenceTracker(entity.DefaultMaxTrackedStreams)
@@ -74,16 +74,14 @@ func main() {
 	defer func() { _ = hotWriter.Close() }()
 
 	wormUploader, err := s3.NewWORMUploader(ctx, s3.Config{
-		Bucket:          envOrDefault("S3_BUCKET", "rag-audit-worm-vault"),
-		Region:          envOrDefault("S3_REGION", "us-east-1"),
-		Endpoint:        os.Getenv("S3_ENDPOINT"),
-		KMSKeyID:        os.Getenv("S3_KMS_KEY_ID"),
-		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
-		UsePathStyle:    envBoolOrDefault("S3_USE_PATH_STYLE", false),
-		RetentionYears:  envIntOrDefault("S3_RETENTION_YEARS", s3.DefaultRetentionYears),
-		Logger:          logger,
-		Metrics:         metrics,
+		Bucket:         envOrDefault("S3_BUCKET", "rag-audit-worm-vault"),
+		Region:         envOrDefault("S3_REGION", "us-east-1"),
+		Endpoint:       os.Getenv("S3_ENDPOINT"),
+		KMSKeyID:       os.Getenv("S3_KMS_KEY_ID"),
+		UsePathStyle:   envBoolOrDefault("S3_USE_PATH_STYLE", false),
+		RetentionYears: envIntOrDefault("S3_RETENTION_YEARS", s3.DefaultRetentionYears),
+		Logger:         logger,
+		Metrics:        metrics,
 	})
 	if err != nil {
 		logger.Error("failed to initialize s3 worm uploader", slog.String("error", err.Error()))
@@ -116,6 +114,7 @@ func main() {
 		Addr:               envOrDefault("HTTP_ADDR", ":8080"),
 		MetricsAddr:        os.Getenv("METRICS_ADDR"),
 		AuthJWTSecret:      os.Getenv("AUTH_JWT_SECRET"),
+		AuthJWTAudience:    envOrDefault("AUTH_JWT_AUDIENCE", "rag-telemetry-audit-daemon"),
 		StaticAdminToken:   os.Getenv("STATIC_ADMIN_TOKEN"),
 		RateLimitPerMinute: envIntOrDefault("RECONCILE_RATE_LIMIT_PER_MIN", 30),
 		OpenAPISpecYAML:    openapi.SpecYAML,

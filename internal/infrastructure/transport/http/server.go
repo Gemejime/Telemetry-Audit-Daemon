@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ type ServerConfig struct {
 	Addr               string
 	MetricsAddr        string
 	AuthJWTSecret      string
+	AuthJWTAudience    string
 	StaticAdminToken   string
 	RateLimitPerMinute int
 	OpenAPISpecYAML    []byte
@@ -93,6 +95,7 @@ func NewServer(cfg ServerConfig) *Server {
 			Handler:           metricsMux,
 			ReadHeaderTimeout: 5 * time.Second,
 			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
 	}
 
@@ -173,10 +176,20 @@ func (s *Server) handleReconcileGaps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const maxReconcileBodyBytes = 64 * 1024
+	r.Body = http.MaxBytesReader(w, r.Body, maxReconcileBodyBytes)
 	var body reconcileHTTPRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, 64*1024))
+	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "BAD_REQUEST",
+			"message": "Invalid JSON request body",
+		})
+		return
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error":   "BAD_REQUEST",
 			"message": "Invalid JSON request body",
@@ -342,11 +355,28 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+type jwtAudience []string
+
+func (a *jwtAudience) UnmarshalJSON(data []byte) error {
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*a = jwtAudience{single}
+		return nil
+	}
+	var multi []string
+	if err := json.Unmarshal(data, &multi); err == nil {
+		*a = jwtAudience(multi)
+		return nil
+	}
+	return errors.New("invalid aud claim")
+}
+
 type authClaims struct {
-	Scope    string   `json:"scope"`
-	TenantID string   `json:"tenant_id"`
-	Tenants  []string `json:"tenants"`
-	Exp      int64    `json:"exp"`
+	Scope    string      `json:"scope"`
+	TenantID string      `json:"tenant_id"`
+	Tenants  []string    `json:"tenants"`
+	Aud      jwtAudience `json:"aud,omitempty"`
+	Exp      *int64      `json:"exp,omitempty"`
 }
 
 func (c authClaims) hasScope(target string) bool {
@@ -390,7 +420,7 @@ func (s *Server) authenticateRequest(authHeader string) (authClaims, int, string
 		return authClaims{}, http.StatusUnauthorized, "Authentication not configured or invalid token"
 	}
 
-	claims, err := verifyHS256JWT(token, []byte(s.cfg.AuthJWTSecret))
+	claims, err := verifyHS256JWT(token, []byte(s.cfg.AuthJWTSecret), s.cfg.AuthJWTAudience)
 	if err != nil {
 		return authClaims{}, http.StatusUnauthorized, "Invalid or expired bearer token"
 	}
@@ -400,7 +430,7 @@ func (s *Server) authenticateRequest(authHeader string) (authClaims, int, string
 	return claims, 0, ""
 }
 
-func verifyHS256JWT(token string, secret []byte) (authClaims, error) {
+func verifyHS256JWT(token string, secret []byte, expectedAud string) (authClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return authClaims{}, errors.New("malformed jwt")
@@ -437,8 +467,11 @@ func verifyHS256JWT(token string, secret []byte) (authClaims, error) {
 	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
 		return authClaims{}, err
 	}
-	if claims.Exp > 0 && time.Now().UTC().Unix() > claims.Exp {
+	if claims.Exp != nil && time.Now().UTC().Unix() >= *claims.Exp {
 		return authClaims{}, errors.New("jwt expired")
+	}
+	if len(claims.Aud) > 0 && (expectedAud == "" || !slices.Contains(claims.Aud, expectedAud)) {
+		return authClaims{}, errors.New("invalid jwt audience")
 	}
 	return claims, nil
 }

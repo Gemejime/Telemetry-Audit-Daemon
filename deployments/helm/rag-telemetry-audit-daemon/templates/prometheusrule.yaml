@@ -21,7 +21,7 @@ spec:
             summary: "Kafka consumer lag exceeds 15,000 records"
             description: "audit_consumer_lag_records has been above 15,000 for more than 3 minutes."
         - alert: HotPersistSLOBreach
-          expr: histogram_quantile(0.99, sum(rate(audit_hot_persist_duration_seconds_bucket[5m])) by (le)) > 2.0
+          expr: histogram_quantile(0.99, sum(rate(audit_hot_persist_duration_seconds_bucket[5m])) by (le, instance)) > 2.0
           for: 2m
           labels:
             severity: page

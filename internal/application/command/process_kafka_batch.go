@@ -355,6 +355,16 @@ func protoToEntity(pb *auditv1.AuditRecord, partition uint16, offset uint64) ent
 	payloadCopy := make([]byte, len(pb.GetPayloadRedacted()))
 	copy(payloadCopy, pb.GetPayloadRedacted())
 
+	var plane entity.PlaneType
+	switch pb.GetPlane() {
+	case auditv1.PlaneType_PLANE_TYPE_READ:
+		plane = entity.PlaneRead
+	case auditv1.PlaneType_PLANE_TYPE_WRITE:
+		plane = entity.PlaneWrite
+	default:
+		plane = entity.PlaneUnspecified
+	}
+
 	return entity.ComplianceEntry{
 		EventID:               pb.GetEventId(),
 		TraceID:               pb.GetTraceId(),
@@ -364,7 +374,7 @@ func protoToEntity(pb *auditv1.AuditRecord, partition uint16, offset uint64) ent
 		KafkaOffset:           offset,
 		SeqID:                 pb.GetSeqId(),
 		EventTime:             ts,
-		Plane:                 entity.PlaneType(pb.GetPlane()), // #nosec G115 -- enum fits int8
+		Plane:                 plane,
 		Action:                pb.GetAction(),
 		ServiceName:           pb.GetServiceName(),
 		ActorID:               actorID,

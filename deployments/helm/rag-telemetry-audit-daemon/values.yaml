@@ -59,6 +59,7 @@ env:
   S3_KMS_KEY_ID: "alias/rag-audit-worm-cmk"
   S3_RETENTION_YEARS: "7"
   RECONCILE_RATE_LIMIT_PER_MIN: "30"
+  AUTH_JWT_AUDIENCE: "rag-telemetry-audit-daemon"
 
 existingSecret: "rag-telemetry-audit-daemon-secrets"
 

@@ -8,6 +8,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const overflowTenantLabel = "other"
+
 // Metrics holds all Prometheus collectors for rag-telemetry-audit-daemon.
 type Metrics struct {
 	Registry                  *prometheus.Registry
@@ -21,14 +23,29 @@ type Metrics struct {
 	S3IntervalOverlapsTotal   prometheus.Counter
 	MalformedRecordsTotal     prometheus.Counter
 	SequenceGapsTotal         prometheus.Counter
+	tenantAllowlist           map[string]struct{}
 }
 
-// NewMetrics registers all daemon Prometheus collectors into a dedicated registry.
+// NewMetrics registers all daemon Prometheus collectors into a dedicated registry
+// with an empty tenant allowlist (mapping all tenants to "other" to bound cardinality).
 func NewMetrics() *Metrics {
+	return NewMetricsWithTenantAllowlist(nil)
+}
+
+// NewMetricsWithTenantAllowlist registers all daemon Prometheus collectors into a dedicated
+// registry and bounds RecordsConsumedTotal tenant_id labels to the provided allowlist plus "other".
+func NewMetricsWithTenantAllowlist(allowedTenants []string) *Metrics {
 	reg := prometheus.NewRegistry()
+	allowlist := make(map[string]struct{}, len(allowedTenants))
+	for _, t := range allowedTenants {
+		if t != "" {
+			allowlist[t] = struct{}{}
+		}
+	}
 
 	m := &Metrics{
-		Registry: reg,
+		Registry:        reg,
+		tenantAllowlist: allowlist,
 		RecordsConsumedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "audit_records_consumed_total",
 			Help: "Total compliance audit records consumed from Kafka, partitioned by tenant_id.",
@@ -94,12 +111,17 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{})
 }
 
-// IncRecordsConsumed increments audit_records_consumed_total for tenantID.
+// IncRecordsConsumed increments audit_records_consumed_total for tenantID,
+// mapping unknown tenants to "other" so Prometheus label cardinality stays bounded.
 func (m *Metrics) IncRecordsConsumed(tenantID string, count int) {
 	if m == nil || count <= 0 {
 		return
 	}
-	m.RecordsConsumedTotal.WithLabelValues(tenantID).Add(float64(count))
+	label := overflowTenantLabel
+	if _, ok := m.tenantAllowlist[tenantID]; ok {
+		label = tenantID
+	}
+	m.RecordsConsumedTotal.WithLabelValues(label).Add(float64(count))
 }
 
 // SetConsumerLag sets audit_consumer_lag_records.

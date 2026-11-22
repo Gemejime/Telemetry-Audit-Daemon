@@ -108,8 +108,8 @@ func TestProcessKafkaBatch_RedactsPoisonPillsAndFlushes(t *testing.T) {
 
 	records := []RawKafkaRecord{
 		{Partition: 1, Offset: 10, Value: []byte("not-valid-protobuf")},
-		{Partition: 1, Offset: 11, Value: makeAuditProtoBytes(t, "tenant-a", "prod-1", 1, `{"email":"alice@example.com"}`)},
-		{Partition: 1, Offset: 12, Value: makeAuditProtoBytes(t, "tenant-a", "prod-2", 5, `{"ssn":"123-45-6789"}`)},
+		{Partition: 1, Offset: 11, Value: makeAuditProtoBytes(t, "tenant-a", "prod-1", 1, `{"action":"search","email":"alice@example.com"}`)},
+		{Partition: 1, Offset: 12, Value: makeAuditProtoBytes(t, "tenant-a", "prod-2", 5, `{"doc_id":"doc-42","ssn":"123-45-6789"}`)},
 	}
 
 	if err := proc.Handle(context.Background(), records); err != nil {
@@ -122,11 +122,25 @@ func TestProcessKafkaBatch_RedactsPoisonPillsAndFlushes(t *testing.T) {
 	if len(hot.batches) != 1 || len(hot.batches[0]) != 2 {
 		t.Fatalf("expected 2 valid records in ClickHouse, got %+v", hot.batches)
 	}
-	if strings.Contains(string(hot.batches[0][0].PayloadRedacted), "alice@example.com") {
-		t.Fatalf("expected email to be redacted, got %s", hot.batches[0][0].PayloadRedacted)
+	byOffset := make(map[uint64]entity.ComplianceEntry, len(hot.batches[0]))
+	for _, entry := range hot.batches[0] {
+		byOffset[entry.KafkaOffset] = entry
 	}
-	if strings.Contains(string(hot.batches[0][1].PayloadRedacted), "123-45-6789") {
-		t.Fatalf("expected SSN to be redacted, got %s", hot.batches[0][1].PayloadRedacted)
+	emailEntry, ok := byOffset[11]
+	if !ok {
+		t.Fatalf("missing offset 11 entry in ClickHouse batch: %+v", hot.batches[0])
+	}
+	emailPayload := string(emailEntry.PayloadRedacted)
+	if strings.Contains(emailPayload, "alice@example.com") || !strings.Contains(emailPayload, `"action":"search"`) {
+		t.Fatalf("expected email redacted and non-sensitive field preserved, got %s", emailPayload)
+	}
+	ssnEntry, ok := byOffset[12]
+	if !ok {
+		t.Fatalf("missing offset 12 entry in ClickHouse batch: %+v", hot.batches[0])
+	}
+	ssnPayload := string(ssnEntry.PayloadRedacted)
+	if strings.Contains(ssnPayload, "123-45-6789") || !strings.Contains(ssnPayload, `"doc_id":"doc-42"`) {
+		t.Fatalf("expected SSN redacted and non-sensitive field preserved, got %s", ssnPayload)
 	}
 	if len(cold.manifests) != 2 {
 		t.Fatalf("expected 2 per-producer S3 Parquet manifests, got %d", len(cold.manifests))

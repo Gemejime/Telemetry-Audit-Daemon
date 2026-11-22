@@ -203,7 +203,7 @@ func (u *WORMUploader) WriteBatch(ctx context.Context, manifest entity.BatchMani
 		return err
 	}
 
-	retainUntil := time.Now().UTC().Add(time.Duration(u.retentionYears) * 365 * 24 * time.Hour)
+	retainUntil := time.Now().UTC().AddDate(u.retentionYears, 0, 0)
 
 	err = u.withRetry(ctx, manifest, key, func() error {
 		input := &s3.PutObjectInput{

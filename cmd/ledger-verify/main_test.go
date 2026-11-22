@@ -69,3 +69,27 @@ func TestExecuteVerify_ExitCodes(t *testing.T) {
 		t.Fatalf("expected exit 2 inconsistent, got %d: %s", code, out.String())
 	}
 }
+
+func TestRunCLI_ToSeqRequiredFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	// Missing --to-seq must be rejected even when --from-seq 0 matches the default toSeq=0.
+	code := runCLI([]string{"--tenant-id", "t1", "--s3-bucket", "b1", "--from-seq", "0"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1 when --to-seq is omitted, got %d", code)
+	}
+
+	// Explicit --to-seq 0 with --from-seq 0 passes flag validation (fails later on unreachable S3/CH or succeeds).
+	stderr.Reset()
+	code = runCLI([]string{
+		"--tenant-id", "t1",
+		"--s3-bucket", "b1",
+		"--from-seq", "0",
+		"--to-seq", "0",
+		"--clickhouse-addr", "127.0.0.1:1",
+		"--timeout", "1",
+	}, &stdout, &stderr)
+	if strings.Contains(stderr.String(), "--to-seq >= --from-seq are required") {
+		t.Fatalf("explicit --to-seq 0 should pass flag validation, got stderr: %s", stderr.String())
+	}
+	_ = code
+}

@@ -62,7 +62,13 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	if opts.tenantID == "" || opts.toSeq < opts.fromSeq || opts.s3Bucket == "" || opts.partition > 65535 {
+	var toSeqSet bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "to-seq" {
+			toSeqSet = true
+		}
+	})
+	if opts.tenantID == "" || !toSeqSet || opts.toSeq < opts.fromSeq || opts.s3Bucket == "" || opts.partition > 65535 {
 		logger.Error("invalid arguments: --tenant-id, --s3-bucket, and --to-seq >= --from-seq are required")
 		return 1
 	}

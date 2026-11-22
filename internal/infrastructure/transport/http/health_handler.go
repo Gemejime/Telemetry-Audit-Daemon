@@ -79,6 +79,13 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.checker.IsDraining() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "draining",
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ready",
 		"checks": checks,
