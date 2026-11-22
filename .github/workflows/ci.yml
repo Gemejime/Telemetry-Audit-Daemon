@@ -58,14 +58,16 @@ jobs:
         with:
           version: latest
 
+      - name: Setup buf (when Protobuf contracts exist)
+        if: hashFiles('api/proto/v1/*.proto') != ''
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: "1.47.2"
+
       - name: Validate Protobuf contracts (buf lint)
         run: |
           if ls api/proto/v1/*.proto >/dev/null 2>&1; then
-            if command -v buf >/dev/null 2>&1; then
-              buf lint
-            else
-              echo "Proto files detected; buf not installed in runner, skipping buf lint."
-            fi
+            buf lint
           else
             echo "No .proto files yet (pre-Phase 1); skipping proto lint."
           fi
@@ -116,11 +118,58 @@ jobs:
                 exit 1
               fi
 
-              # 2. Disallow logging sensitive credentials, raw PII/PHI, or auth headers
-              if grep -rniE --include="*.go" --exclude="*_test.go" 'slog\.(Info|Warn|Error|Debug|Log)(Context)?.*(\bauthorization\b|\bbearer_token\b|\braw_payload\b|\braw_pii\b|\baws_secret\b|\bkms_key_material\b|\bclickhouse_password\b|\bsasl_password\b|\bdsn\b)' "$dir"; then
-                echo "ERROR: Potential unredacted sensitive field in slog call inside $dir/."
-                exit 1
-              fi
+              # 2. Disallow logging sensitive credentials, raw PII/PHI, or auth headers across multi-line slog calls
+              python3 - "$dir" <<'PY'
+              import os, re, sys
+
+              root = sys.argv[1]
+              call_re = re.compile(r'slog\.(Info|Warn|Error|Debug|Log)(?:Context)?\s*\(')
+              sens_re = re.compile(
+                  r'\b(authorization|bearer_token|raw_payload|raw_pii|aws_secret|kms_key_material|clickhouse_password|sasl_password|dsn)\b',
+                  re.IGNORECASE,
+              )
+
+              failed = False
+              for dirpath, _, filenames in os.walk(root):
+                  for fn in filenames:
+                      if not fn.endswith('.go') or fn.endswith('_test.go'):
+                          continue
+                      path = os.path.join(dirpath, fn)
+                      with open(path, 'r', encoding='utf-8') as f:
+                          src = f.read()
+                      for m in call_re.finditer(src):
+                          depth = 1
+                          i = m.end()
+                          in_str = None
+                          escaped = False
+                          while i < len(src) and depth > 0:
+                              ch = src[i]
+                              if in_str == '"':
+                                  if escaped:
+                                      escaped = False
+                                  elif ch == '\\':
+                                      escaped = True
+                                  elif ch == '"':
+                                      in_str = None
+                              elif in_str == '`':
+                                  if ch == '`':
+                                      in_str = None
+                              else:
+                                  if ch in ('"', '`'):
+                                      in_str = ch
+                                  elif ch == '(':
+                                      depth += 1
+                                  elif ch == ')':
+                                      depth -= 1
+                              i += 1
+                          call_text = src[m.start():i]
+                          if sens_re.search(call_text):
+                              line = src.count('\n', 0, m.start()) + 1
+                              print(f"ERROR: Potential unredacted sensitive field in slog call at {path}:{line}")
+                              failed = True
+              if failed:
+                  sys.exit(1)
+              PY
             fi
           done
           echo "Secured Logging Audit passed."
@@ -152,9 +201,8 @@ jobs:
 
       - name: Validate OpenAPI 3.1 specification (Spectral)
         if: hashFiles('api/openapi/openapi.yaml') != ''
-        uses: stoplightio/spectral-action@v0.8.11
-        with:
-          file_glob: "api/openapi/openapi.yaml"
+        run: |
+          npx --yes @stoplight/spectral-cli@6.11.1 lint --ruleset .spectral.yaml api/openapi/openapi.yaml
 
       - name: Enforce Doc API & OpenAPI Sync on Contract Changes
         if: github.event_name == 'pull_request'
@@ -165,11 +213,12 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
-          CONTRACT_TOUCHED=$(echo "$CHANGED" | grep -E '^(cmd/|api/proto/|pkg/auditclient/|internal/domain/|internal/infrastructure/persistence/|internal/infrastructure/transport/|internal/application/)' || true)
+          CONTRACT_TOUCHED=$(echo "$CHANGED" | grep -E '^(cmd/|api/proto/|api/openapi/openapi\.yaml$|pkg/auditclient/|internal/domain/|internal/infrastructure/persistence/|internal/infrastructure/transport/|internal/application/)' || true)
           if [ -n "$CONTRACT_TOUCHED" ]; then
-            DOC_SYNCED=$(echo "$CHANGED" | grep -E '^(\.ai/doc-api\.md|api/openapi/openapi\.yaml)$' || true)
-            if [ -z "$DOC_SYNCED" ]; then
-              echo "ERROR: Contract/transport/application files changed without updating .ai/doc-api.md or api/openapi/openapi.yaml."
+            DOC_API_SYNCED=$(echo "$CHANGED" | grep -E '^\.ai/doc-api\.md$' || true)
+            OPENAPI_SYNCED=$(echo "$CHANGED" | grep -E '^api/openapi/openapi\.yaml$' || true)
+            if [ -z "$DOC_API_SYNCED" ] || [ -z "$OPENAPI_SYNCED" ]; then
+              echo "ERROR: Contract/transport/application files changed without updating both .ai/doc-api.md and api/openapi/openapi.yaml."
               echo "Touched files:"
               echo "$CONTRACT_TOUCHED"
               exit 1
