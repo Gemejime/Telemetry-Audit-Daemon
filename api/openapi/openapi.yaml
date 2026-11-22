@@ -1,0 +1,334 @@
+openapi: 3.1.0
+info:
+  title: RAG Telemetry & Audit Daemon Admin API
+  version: 1.0.0
+  description: >
+    Internal HTTP API for Kubernetes liveness/readiness probes, Prometheus metrics,
+    partition sequence reconciliation across ClickHouse and AWS S3 WORM, and OpenAPI documentation.
+servers:
+  - url: http://localhost:8080
+    description: Internal Service / Cluster Ops
+tags:
+  - name: Probes
+    description: Kubernetes liveness and readiness health check endpoints
+  - name: Observability
+    description: Prometheus telemetry scrape endpoints
+  - name: Reconciliation
+    description: Cross-tier ClickHouse and S3 WORM sequence gap reconciliation
+  - name: Documentation
+    description: OpenAPI specification and interactive API documentation
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Kubernetes liveness probe
+      description: Returns 200 OK when the audit daemon process is alive.
+      tags:
+        - Probes
+      responses:
+        "200":
+          description: Daemon process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /ready:
+    get:
+      operationId: getReady
+      summary: Kubernetes readiness probe
+      description: >
+        Returns 200 OK when the Kafka consumer group is healthy and not draining.
+        Returns 503 Service Unavailable during SIGTERM drain or when Kafka consumer health fails.
+      tags:
+        - Probes
+      responses:
+        "200":
+          description: Daemon is ready to process compliance records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: Daemon is draining or Kafka consumer health check failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotReadyResponse"
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics scrape endpoint
+      description: Exposes Prometheus text exposition metrics for audit ingestion, lag, persistence latency, and spillover state.
+      tags:
+        - Observability
+      responses:
+        "200":
+          description: Prometheus metrics payload
+          content:
+            text/plain:
+              schema:
+                type: string
+  /v1/reconcile/gaps:
+    post:
+      operationId: reconcilePartitionGaps
+      summary: Trigger partition sequence gap reconciliation
+      description: >
+        Compares [min_seq, max_seq] manifests in S3 WORM Parquet metadata against ClickHouse
+        ReplicatedReplacingMergeTree rows for a given tenant and Kafka partition.
+      tags:
+        - Reconciliation
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: false
+          description: Optional ULID or UUID request correlation identifier; generated if omitted.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReconcileGapsRequest"
+      responses:
+        "200":
+          description: Reconciliation completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconcileGapsResponse"
+        "400":
+          description: Invalid tenant_id, negative partition, or from_seq > to_seq
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Insufficient audit:reconcile scope or tenant authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Reconciliation rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: ClickHouse or S3 metadata store temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /openapi.yaml:
+    get:
+      operationId: getOpenAPISpec
+      summary: Raw OpenAPI 3.1 YAML specification
+      description: Returns the raw OpenAPI 3.1.0 YAML document for this service.
+      tags:
+        - Documentation
+      responses:
+        "200":
+          description: OpenAPI 3.1 YAML specification
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /docs:
+    get:
+      operationId: getDocs
+      summary: Interactive API documentation
+      description: Serves the Swagger UI / OpenAPI documentation HTML page.
+      tags:
+        - Documentation
+      responses:
+        "200":
+          description: HTML documentation page
+          content:
+            text/html:
+              schema:
+                type: string
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Scoped bearer token requiring the audit:reconcile scope.
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - alive
+          example: alive
+    ReadyChecks:
+      type: object
+      required:
+        - kafka_consumer
+        - clickhouse
+        - wal_spillover_active
+      properties:
+        kafka_consumer:
+          type: string
+          example: ok
+        clickhouse:
+          type: string
+          example: ok
+        wal_spillover_active:
+          type: boolean
+          example: false
+    ReadyResponse:
+      type: object
+      required:
+        - status
+        - checks
+      properties:
+        status:
+          type: string
+          enum:
+            - ready
+          example: ready
+        checks:
+          $ref: "#/components/schemas/ReadyChecks"
+    NotReadyResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - draining
+            - not_ready
+          example: not_ready
+        checks:
+          $ref: "#/components/schemas/ReadyChecks"
+    ReconcileGapsRequest:
+      type: object
+      required:
+        - tenant_id
+        - partition
+        - from_seq
+        - to_seq
+      properties:
+        tenant_id:
+          type: string
+          minLength: 1
+          example: tenant-corp-01
+        partition:
+          type: integer
+          format: int32
+          minimum: 0
+          example: 3
+        from_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 100000
+        to_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 125000
+    CheckedRange:
+      type: object
+      required:
+        - min_seq
+        - max_seq
+      properties:
+        min_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 100000
+        max_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 125000
+    SequenceGap:
+      type: object
+      required:
+        - producer_id
+        - min_seq
+        - max_seq
+        - missing_in
+      properties:
+        producer_id:
+          type: string
+          example: search-orch-7f9b
+        min_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 100420
+        max_seq:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 100425
+        missing_in:
+          type: string
+          enum:
+            - s3
+            - clickhouse
+            - both
+          example: s3
+    ReconcileGapsResponse:
+      type: object
+      required:
+        - tenant_id
+        - partition
+        - checked_range
+        - gaps
+        - status
+      properties:
+        tenant_id:
+          type: string
+          example: tenant-corp-01
+        partition:
+          type: integer
+          format: int32
+          minimum: 0
+          example: 3
+        checked_range:
+          $ref: "#/components/schemas/CheckedRange"
+        gaps:
+          type: array
+          items:
+            $ref: "#/components/schemas/SequenceGap"
+        status:
+          type: string
+          enum:
+            - consistent
+            - inconsistent
+          description: >
+            "inconsistent" when gaps is non-empty (including records missing from "s3" or "clickhouse");
+            "consistent" only when gaps is empty.
+          example: inconsistent
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          example: BAD_REQUEST
+        message:
+          type: string
+          example: Invalid tenant_id, negative partition, or from_seq > to_seq

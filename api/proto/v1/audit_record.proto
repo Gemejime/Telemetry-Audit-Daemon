@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package rag.audit.v1;
+
+option go_package = "rag-telemetry-audit-daemon/api/proto/v1;auditv1";
+
+import "google/protobuf/timestamp.proto";
+
+// PlaneType distinguishes non-blocking read-plane queries from fail-closed write-plane mutations.
+enum PlaneType {
+  PLANE_TYPE_UNSPECIFIED = 0;
+  PLANE_TYPE_READ = 1;  // Search queries (non-blocking, sheds metadata at 90% fill)
+  PLANE_TYPE_WRITE = 2; // Document upload, delete, ACL mutations (fail-closed HTTP 503)
+}
+
+// ActorContext captures the authenticated caller identity and salted network origin.
+message ActorContext {
+  string actor_id = 1;
+  string tenant_id = 2;
+  string auth_method = 3;
+  string source_ip_hash = 4; // Salted hash; never raw PII IP unless compliance-mandated
+}
+
+// AccessTrace captures retrieval provenance for RAG query audits.
+message AccessTrace {
+  repeated uint32 doc_ids = 1;
+  repeated string chunk_ids = 2;
+  bool cache_hit = 3;
+  string embedding_model_version = 4;
+  repeated string document_versions = 5; // Immutable doc version lineage (v1..vn)
+}
+
+// AuditRecord is the canonical compliance payload emitted by pkg/auditclient and consumed by rag-telemetry-audit-daemon.
+message AuditRecord {
+  string event_id = 1; // ULID/UUID
+  string trace_id = 2;
+  string tenant_id = 3;
+  uint64 seq_id = 4; // Monotonic per (producer_id, tenant_id, kafka_partition)
+  google.protobuf.Timestamp event_time = 5;
+  PlaneType plane = 6;
+  string action = 7;       // e.g., "search.query", "document.upload", "acl.mutate"
+  string service_name = 8; // e.g., "rag-search-orchestrator"
+  ActorContext actor = 9;
+  AccessTrace access_trace = 10;
+  bytes payload_redacted = 11; // Sanitized/redacted metadata bytes
+  uint32 prompt_tokens = 12;
+  uint32 completion_tokens = 13;
+  string producer_id = 14; // Unique caller pod/instance ID for multi-producer seq monotonicity
+}
