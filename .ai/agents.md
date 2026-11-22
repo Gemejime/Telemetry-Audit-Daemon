@@ -19,7 +19,7 @@ The `rag-telemetry-audit-daemon` operates as the compliance ledger engine of the
 3. **Byte-Pooled In-Flight PII/PHI Redaction (`pkg/redaction/`, `pkg/pool/byte_pool.go`)**:
    - Scans and masks PII/PHI directly over pooled `[]byte` slices using compiled Aho-Corasick patterns and regexes ($\le 128\text{ B/op}$ amortized allocation budget, zero `string` casting until final persistence).
 4. **Partition-Scoped Monotonic Sequence Tracking (`internal/domain/entity/batch_manifest.go`)**:
-   - Tracks `[min_seq, max_seq]` per `(tenant_id, partition)` and flags sequence gaps before committing.
+   - Tracks `[min_seq, max_seq]` per `(tenant_id, partition, producer_id)` so each producer's sequence gaps are detected independently, and flags sequence gaps before committing.
 5. **Two-Tier Persistence & NVMe WAL Spillover**:
    - *Hot Tier (ClickHouse)*: Native TCP RowBinary streams flushed every `1,000 ms` or `2,500` records (P99 $\le 2\text{ s}$).
    - *Cold Tier (AWS S3 WORM)*: Micro-batched Parquet flushed every `60 s` or `32 MiB` (P99 $\le 60\text{ s}$) with Object Lock (Compliance Mode, 7-year retention), KMS CMK, and `[min_seq, max_seq]` Parquet metadata.

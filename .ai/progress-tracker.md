@@ -18,7 +18,7 @@ This roadmap tracks the implementation milestones detailed in `tasks/RAG Telemet
 
 - **ADR-001: Cloud-Native WORM over Application Merkle Trees**: Deprecates application-level Merkle root hashing. Adopts AWS S3 Object Lock in Compliance Mode along with KMS CMK auditing and CloudTrail data events to fulfill SOC 2 Type II and HIPAA tamper-resistance requirements.
 - **ADR-002: Dual Ingestion Routing Architecture**: Diagnostic performance traces are routed directly to an OpenTelemetry Collector (`rag-trace-collector-worker`). Compliance-critical audit logs route exclusively to Kafka (`audit-compliance-records`), isolating system monitoring overhead from legal compliance paths.
-- **ADR-003: Two-Tier Storage Flush Intervals**: ClickHouse provides hot analytical indexing within a `2-second` P99 SLO (`1,000 ms` / `2,500` records); S3 provides cold, immutable archival within a `60-second` / `32 MiB` boundary, preventing S3 API saturation and excessive `PUT` costs.
+- **ADR-003: Two-Tier Storage Flush Intervals**: ClickHouse provides hot analytical indexing within a `2-second` P99 SLO (`1,000 ms` / `2,500` records); S3 cold archival uses a `60-second` / `32 MiB` batch flush threshold (not a guaranteed archival time, as actual archival completion depends on S3 availability, with `mmap_wal` buffering outages), preventing S3 API saturation and excessive `PUT` costs.
 - **ADR-004: Standardized Kubernetes Deployment Topology**: Replaces the mixed DaemonSet and Deployment setup with a standard horizontal Kubernetes Deployment (`3–8` replicas), scaling pods based on Kafka topic partition consumer lag.
 
 ---
@@ -34,8 +34,8 @@ This roadmap tracks the implementation milestones detailed in `tasks/RAG Telemet
 - **Remediation**: Verify S3 key structure. Ensure files include a randomized prefix or hash segment (`s3://vault/tenant_<id>/<hash>/year=YYYY/...`) to spread write operations evenly across AWS S3 storage partitions.
 
 ### Runbook 3: Missing Sequence Reconciliation
-- **Symptom**: CLI tool `ledger-verify` (or `POST /v1/reconcile/gaps`) reports a gap in `[min_seq, max_seq]` for a tenant.
-- **Remediation**: Run `reconcile_partition_gaps` against ClickHouse using the matching partition identifier to check if records exist in the hot tier but were delayed in S3 Parquet batch compilation. If data is missing in both, inspect caller-side drop metrics (`audit_caller_dropped_records_total`) for network-level or diagnostic-channel drops.
+- **Symptom**: CLI tool `ledger-verify` (or `POST /v1/reconcile/gaps`) reports a gap in `[min_seq, max_seq]` for a tenant; record the affected `producer_id` alongside `tenant_id` and `partition` to distinguish overlapping sequence ranges from different producers.
+- **Remediation**: Run `reconcile_partition_gaps` against ClickHouse using `(tenant_id, partition, producer_id)` to check if records exist in the hot tier but were delayed in S3 Parquet batch compilation. If data is missing in both ClickHouse and S3, check Kafka `audit-compliance-records` retention for the affected partition and replay the missing records if still within retention; if retention has expired and replay is unavailable, escalate immediately per compliance incident procedure. (Separately, `audit_caller_dropped_records_total` may be inspected for diagnostic context on upstream shedding or diagnostic-channel drops, not as a recovery step.)
 
 ---
 

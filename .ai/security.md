@@ -33,7 +33,7 @@
    - Read-only root filesystem (`readOnlyRootFilesystem: true`) with ephemeral NVMe `emptyDir` (`10 GiB` ceiling) mounted solely for `mmap_wal` (`5 GiB` cap).
    - Drop all Linux capabilities (`capabilities: drop: ["ALL"]`).
 2. **Kubernetes Network Policies**:
-   - **Ingress**: Restricted to Prometheus scraper on `/metrics` and authorized internal ops/admin callers on `:8080` (`/healthz`, `/ready`, `/v1/reconcile/gaps`).
+   - **Ingress**: Kubernetes `NetworkPolicy` operates at L3/L4 and cannot enforce HTTP path restrictions; separate `/metrics` onto a dedicated metrics port (restricted to the Prometheus scraper) and admin/reconciliation endpoints onto a separate port or behind a path-aware proxy (restricted to authorized internal ops/admin callers), while retaining application-level bearer authentication for `/v1/reconcile/gaps`.
    - **Egress**: Allowed only to Apache Kafka (`audit-compliance-records`), ClickHouse (`ReplicatedMergeTree` native TCP), AWS S3 / KMS endpoints, and cluster DNS (`kube-dns`/`CoreDNS` `:53`).
 3. **Transport Security**:
    - TLS/mTLS for Kafka consumer connections and ClickHouse native TCP; HTTPS/TLS 1.3 for AWS S3 + KMS API calls.

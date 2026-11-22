@@ -34,7 +34,7 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
   - Caller-side bounded channels in `pkg/auditclient`: read-plane sheds non-essential metadata at $90\%$ fill; write-plane blocks and returns a typed sentinel error (`ErrAuditUnavailable`) which HTTP caller services map to `HTTP 503`.
   - Admin HTTP server rate-limits `POST /v1/reconcile/gaps` via token-bucket middleware to prevent ClickHouse/S3 scan amplification.
 - **Idempotency**:
-  - Partition-scoped monotonic `(producer_id, tenant_id, partition, seq_id)` ordering, `ReplicatedReplacingMergeTree` in ClickHouse, and deterministic S3 object keys (`s3://vault/tenant_<id>/<hash>/year=YYYY/.../min_seq-max_seq.parquet`) prevent duplicate or out-of-order ledger corruption on consumer rebalances or 60s S3-hold replays.
+  - Partition-scoped monotonic `(producer_id, tenant_id, partition, seq_id)` ordering and `ReplicatedReplacingMergeTree` in ClickHouse prevent duplicate or out-of-order hot-tier ledger rows on consumer rebalances or 60s S3-hold replays. In the cold S3 WORM tier, immutable Parquet objects (`s3://vault/tenant_<id>/<hash>/year=YYYY/.../min_seq-max_seq.parquet`) may span overlapping `[min_seq, max_seq]` ranges across replays; cold-tier readers and reconciliation must deduplicate overlapping intervals and emit an overlap alert when overlaps are detected.
 
 ### Layer 2: Data Persistence & State
 - **Database Migrations**:
@@ -60,7 +60,7 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
 
 ### Layer 4: Security & Identity
 - **AuthN vs AuthZ**:
-  - Tenant isolation enforced via `hash(tenant_id)` Kafka partitioning and tenant-prefixed S3/ClickHouse keys. Admin/reconciliation endpoints require scoped bearer auth; S3 writes use IAM least-privilege roles with KMS CMK and Object Lock Compliance Mode.
+  - Tenant isolation requires validating each producer's trusted tenant binding (e.g., authenticated service/credential claim) before accepting its supplied `tenant_id`, independently of `hash(tenant_id)` Kafka partitioning and tenant-prefixed S3/ClickHouse storage key routing. All reads and writes of stored records—including access via admin and reconciliation endpoints (`/v1/reconcile/gaps`)—must enforce tenant-scoped authorization alongside scoped bearer auth; S3 writes use IAM least-privilege roles with KMS CMK and Object Lock Compliance Mode.
 - **Configuration & Secrets Management**:
   - 12-factor environment variables; Kafka SASL/TLS, ClickHouse, and AWS credentials injected via Kubernetes Secrets / external secret stores (never committed to git).
 - **Data Protection & Secured Logging**:

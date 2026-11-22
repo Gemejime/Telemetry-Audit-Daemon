@@ -65,9 +65,10 @@ Executes `reconcile_partition_gaps.go` to compare `[min_seq, max_seq]` manifests
       "missing_in": "s3"
     }
   ],
-  "status": "consistent"
+  "status": "inconsistent"
 }
 ```
+  - `status` is `"inconsistent"` when `gaps` is non-empty (including records missing from `"s3"` or `"clickhouse"`), and `"consistent"` only when `gaps` is empty (`[]`).
 - **Error Responses**:
   - `400 Bad Request`: `{"error": "BAD_REQUEST", "message": "Invalid tenant_id, negative partition, or from_seq > to_seq"}`
   - `401 Unauthorized` / `403 Forbidden`: `{"error": "UNAUTHORIZED", "message": "Missing or insufficient audit:reconcile scope"}`
@@ -182,6 +183,6 @@ ORDER BY (tenant_id, event_time, producer_id, seq_id);
   - `x-amz-object-lock-retain-until-date: <now + 7 years>`
   - `x-amz-server-side-encryption: aws:kms` (Customer-Managed Key + S3 Bucket Keys)
 - **Parquet Column Schema**:
-  - `event_id` (`BYTE_ARRAY/UTF8`), `trace_id` (`BYTE_ARRAY/UTF8`), `tenant_id` (`BYTE_ARRAY/UTF8`), `producer_id` (`BYTE_ARRAY/UTF8`), `kafka_partition` (`INT32`), `kafka_offset` (`INT64`), `seq_id` (`INT64` / uint64 bit-exact), `event_time_ms` (`INT64/TIMESTAMP_MILLIS`), `plane` (`INT32`), `action` (`BYTE_ARRAY/UTF8`), `service_name` (`BYTE_ARRAY/UTF8`), `actor_id` (`BYTE_ARRAY/UTF8`), `auth_method` (`BYTE_ARRAY/UTF8`), `source_ip_hash` (`BYTE_ARRAY/UTF8`), `doc_ids` (`LIST<INT32>`), `chunk_ids` (`LIST<BYTE_ARRAY>`), `document_versions` (`LIST<BYTE_ARRAY>`), `cache_hit` (`BOOLEAN`), `embedding_model_version` (`BYTE_ARRAY/UTF8`), `payload_redacted` (`BYTE_ARRAY`), `prompt_tokens` (`INT32`), `completion_tokens` (`INT32`).
+  - `event_id` (`BYTE_ARRAY/UTF8`), `trace_id` (`BYTE_ARRAY/UTF8`), `tenant_id` (`BYTE_ARRAY/UTF8`), `producer_id` (`BYTE_ARRAY/UTF8`), `kafka_partition` (`INT32`), `kafka_offset` (`INT64`), `seq_id` (`INT64` / `INT(64, false)`), `event_time_ms` (`INT64/TIMESTAMP_MILLIS`), `plane` (`INT32`), `action` (`BYTE_ARRAY/UTF8`), `service_name` (`BYTE_ARRAY/UTF8`), `actor_id` (`BYTE_ARRAY/UTF8`), `auth_method` (`BYTE_ARRAY/UTF8`), `source_ip_hash` (`BYTE_ARRAY/UTF8`), `doc_ids` (`LIST<INT32>` with `INT(32, false)` elements), `chunk_ids` (`LIST<BYTE_ARRAY>`), `document_versions` (`LIST<BYTE_ARRAY>`), `cache_hit` (`BOOLEAN`), `embedding_model_version` (`BYTE_ARRAY/UTF8`), `payload_redacted` (`BYTE_ARRAY`), `prompt_tokens` (`INT32` / `INT(32, false)`), `completion_tokens` (`INT32` / `INT(32, false)`).
 - **Parquet File Key-Value Metadata**:
   - `tenant_id`, `producer_id`, `kafka_partition`, `min_seq`, `max_seq`, `record_count`, `schema_version`
