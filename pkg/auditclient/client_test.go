@@ -363,6 +363,51 @@ func TestDiagnosticRingBufferDropsAndExports(t *testing.T) {
 	}
 }
 
+func TestRingBufferNilSinkCountsDroppedOnFlush(t *testing.T) {
+	rb := NewRingBuffer(4, time.Minute, nil, discardLogger())
+	rb.Push(DiagnosticSpan{TraceID: "t1", Name: "span1"})
+	rb.Push(DiagnosticSpan{TraceID: "t2", Name: "span2"})
+
+	if err := rb.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if rb.DroppedTotal() != 2 {
+		t.Fatalf("expected 2 dropped spans with nil sink, got %d", rb.DroppedTotal())
+	}
+}
+
+func TestClientCloseRetriesAfterDeadlineExceeded(t *testing.T) {
+	blockCh := make(chan struct{})
+	mp := &mockProducer{blockCh: blockCh}
+	sink := &mockDiagnosticSink{}
+	cl, err := NewClient(Config{
+		Producer:                mp,
+		ProducerID:              "pod-close-retry",
+		DiagnosticSink:          sink,
+		DiagnosticFlushInterval: time.Minute,
+		Logger:                  discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	cl.RecordDiagnostic(DiagnosticSpan{TraceID: "t-diag", Name: "span"})
+
+	expiredCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cl.Close(expiredCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on first Close, got %v", err)
+	}
+
+	close(blockCh)
+	if err := cl.Close(context.Background()); err != nil {
+		t.Fatalf("expected second Close to succeed, got %v", err)
+	}
+	if sink.count() != 1 {
+		t.Fatalf("expected diagnostic final flush to export 1 span, got %d", sink.count())
+	}
+}
+
 func BenchmarkPartitionForTenant(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

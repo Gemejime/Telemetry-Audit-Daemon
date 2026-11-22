@@ -80,6 +80,41 @@ func TestRedactInto_Patterns(t *testing.T) {
 			in:   `{"actor":"bob@example.org","Authorization":"Bearer abcdef12345","ssn":"123-45-6789","ip":"10.0.0.1"}`,
 			want: `{"actor":"[REDACTED]","Authorization":"Bearer [REDACTED]","ssn":"[REDACTED]","ip":"[REDACTED]"}`,
 		},
+		{
+			name: "auth_basic_header",
+			in:   `Authorization: Basic dXNlcjpwYXNz`,
+			want: `Authorization: [REDACTED]`,
+		},
+		{
+			name: "auth_basic_json",
+			in:   `{"Authorization":"Basic dXNlcjpwYXNz"}`,
+			want: `{"Authorization":"[REDACTED]"}`,
+		},
+		{
+			name: "json_secret_with_newlines",
+			in:   "{\"api_key\"\n  :\n  \"key_abc123456\"}",
+			want: "{\"api_key\"\n  :\n  \"[REDACTED]\"}",
+		},
+		{
+			name: "password_with_punctuation",
+			in:   `password=p@ss!w0rd#123 user=alice`,
+			want: `password=[REDACTED] user=alice`,
+		},
+		{
+			name: "email_trailing_period",
+			in:   `Contact alice@example.com. Next`,
+			want: `Contact [REDACTED]. Next`,
+		},
+		{
+			name: "pan_followed_by_unrelated_digits",
+			in:   `card 4532-0151-1283-0366 999`,
+			want: `card [REDACTED] 999`,
+		},
+		{
+			name: "phone_repeated_dashes_bounded",
+			in:   `id=1----------------------------------------2`,
+			want: `id=1----------------------------------------2`,
+		},
 	}
 
 	dst := make([]byte, 0, 1024)

@@ -123,3 +123,44 @@ func TestMmapWAL_DetectsCRC32Corruption(t *testing.T) {
 		t.Fatalf("expected ErrWALCorrupt, got %v", err)
 	}
 }
+
+func TestMmapWAL_AckDeletesSoleSegmentAndUsesFreshID(t *testing.T) {
+	dir := t.TempDir()
+	wal, err := NewMmapWAL(dir, 1024, 512, nil)
+	if err != nil {
+		t.Fatalf("NewMmapWAL: %v", err)
+	}
+	defer func() { _ = wal.Close() }()
+
+	ctx := context.Background()
+	if err := wal.Append(ctx, []byte("first")); err != nil {
+		t.Fatalf("Append 1: %v", err)
+	}
+	recs, err := wal.Drain(ctx, 10)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Drain 1: len=%d err=%v", len(recs), err)
+	}
+	firstSegID := recs[0].SegmentID
+	if err := wal.Ack(ctx, firstSegID, recs[0].Offset); err != nil {
+		t.Fatalf("Ack 1: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected sole drained segment to be removed, found %d files", len(entries))
+	}
+
+	if err := wal.Append(ctx, []byte("second")); err != nil {
+		t.Fatalf("Append 2: %v", err)
+	}
+	recs2, err := wal.Drain(ctx, 10)
+	if err != nil || len(recs2) != 1 {
+		t.Fatalf("Drain 2: len=%d err=%v", len(recs2), err)
+	}
+	if recs2[0].SegmentID <= firstSegID {
+		t.Fatalf("expected fresh monotonic segment ID > %d, got %d", firstSegID, recs2[0].SegmentID)
+	}
+}

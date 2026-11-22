@@ -106,3 +106,43 @@ func TestSequenceTracker_BoundedEvictionAndProducerIsolation(t *testing.T) {
 		t.Fatalf("expected 2 tracked streams after eviction, got %d", tracker.TrackedStreams())
 	}
 }
+
+func TestSequenceTracker_CrossBatchGapAndLateGapFill(t *testing.T) {
+	tracker := NewSequenceTracker(10)
+
+	// Batch 1: [1, 2, 3]
+	m1 := tracker.TrackBatch([]ComplianceEntry{
+		makeEntry("prod-a", "tenant-1", 0, 1),
+		makeEntry("prod-a", "tenant-1", 0, 2),
+		makeEntry("prod-a", "tenant-1", 0, 3),
+	})
+	if len(m1[0].Gaps) != 0 {
+		t.Fatalf("expected no gaps in batch 1, got %+v", m1[0].Gaps)
+	}
+
+	// Batch 2: [6, 7] -> cross-batch gap [4, 5] reported once
+	m2 := tracker.TrackBatch([]ComplianceEntry{
+		makeEntry("prod-a", "tenant-1", 0, 6),
+		makeEntry("prod-a", "tenant-1", 0, 7),
+	})
+	if len(m2[0].Gaps) != 1 || m2[0].Gaps[0].MinSeq != 4 || m2[0].Gaps[0].MaxSeq != 5 {
+		t.Fatalf("expected single gap [4,5], got %+v", m2[0].Gaps)
+	}
+
+	// Batch 3: late gap fill [4, 5] must not be counted as duplicates
+	m3 := tracker.TrackBatch([]ComplianceEntry{
+		makeEntry("prod-a", "tenant-1", 0, 4),
+		makeEntry("prod-a", "tenant-1", 0, 5),
+	})
+	if m3[0].DuplicateCount != 0 {
+		t.Fatalf("expected 0 duplicates for late gap fill, got %d", m3[0].DuplicateCount)
+	}
+
+	// Batch 4: replay of [4] is now a duplicate
+	m4 := tracker.TrackBatch([]ComplianceEntry{
+		makeEntry("prod-a", "tenant-1", 0, 4),
+	})
+	if m4[0].DuplicateCount != 1 {
+		t.Fatalf("expected 1 duplicate for replayed gap fill, got %d", m4[0].DuplicateCount)
+	}
+}
