@@ -80,9 +80,9 @@ Executes `reconcile_partition_gaps.go` to compare `[min_seq, max_seq]` manifests
 ## 2. Protobuf v3 & Kafka Ingress Contract (`api/proto/v1/audit_record.proto`)
 
 ### Kafka Topic Specification
-- **Topic**: `audit-compliance-records`
-- **Partition Key**: `hash(tenant_id)`
-- **Broker Config**: Apache Kafka 3.7+, `min.insync.replicas=2`, `acks=all`, 7-day log retention.
+- **Topic**: `audit-compliance-records` (`deployments/kafka/audit-compliance-records.yaml`)
+- **Partition Key**: `hash(tenant_id)` (deterministic FNV-1a 32-bit modulo `8` default partitions via `auditclient.PartitionForTenant`)
+- **Broker Config**: Apache Kafka 3.7+, `partitions=8`, `replicas=3`, `min.insync.replicas=2`, `acks=all` (`kgo.AllISRAcks()`), `retention.ms=604800000` (7-day log retention).
 
 ### `api/proto/v1/audit_record.proto`
 Canonical compliance payload emitted by `pkg/auditclient` and consumed by `rag-telemetry-audit-daemon`:
