@@ -252,7 +252,7 @@ jobs:
       - name: Run unit & race-detector test suites
         if: steps.go_check.outputs.has_go == 'true'
         run: |
-          go test -v -race -count=1 ./pkg/... ./internal/... ./cmd/... $( [ -d test/unit ] && echo ./test/unit/... )
+          go test -v -race -count=1 ./pkg/... ./internal/... ./cmd/... $( [ -d test/unit ] && echo ./test/unit/... ) $( [ -d test/chaos ] && echo ./test/chaos/... )
 
       - name: Run redaction memory allocation benchmark (<= 128 B/op target)
         if: steps.go_check.outputs.has_go == 'true' && hashFiles('pkg/redaction/*_test.go') != ''
