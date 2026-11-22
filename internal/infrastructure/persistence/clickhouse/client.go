@@ -130,6 +130,11 @@ func (c *Client) PrepareBatch(ctx context.Context, query string, opts ...driver.
 	return c.conn.PrepareBatch(ctx, query, opts...)
 }
 
+// Query delegates read queries to the underlying ClickHouse native TCP connection.
+func (c *Client) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	return c.conn.Query(ctx, query, args...)
+}
+
 // Ping verifies ClickHouse connectivity.
 func (c *Client) Ping(ctx context.Context) error {
 	return c.conn.Ping(ctx)

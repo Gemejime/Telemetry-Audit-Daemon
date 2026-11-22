@@ -11,6 +11,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
 	"rag-telemetry-audit-daemon/internal/domain/entity"
+	"rag-telemetry-audit-daemon/internal/domain/repository"
 )
 
 const insertComplianceRecordsSQL = `INSERT INTO audit_compliance_records (
@@ -27,6 +28,11 @@ type BatchConn interface {
 	PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error)
 	Ping(ctx context.Context) error
 	Close() error
+}
+
+// QueryConn abstracts read queries for cross-tier sequence reconciliation without breaking BatchConn mocks.
+type QueryConn interface {
+	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
 }
 
 // MetricsRecorder receives hot-tier persistence latency observations (audit_hot_persist_duration_seconds).
@@ -166,6 +172,67 @@ func (w *RowBinaryWriter) WriteBatch(ctx context.Context, entries []entity.Compl
 // Ping verifies ClickHouse connectivity.
 func (w *RowBinaryWriter) Ping(ctx context.Context) error {
 	return w.conn.Ping(ctx)
+}
+
+const selectSequenceRangesSQL = `SELECT producer_id, seq_id
+FROM audit_compliance_records FINAL
+WHERE tenant_id = ? AND kafka_partition = ? AND seq_id >= ? AND seq_id <= ?
+ORDER BY producer_id ASC, seq_id ASC`
+
+// QuerySequenceRanges queries FINAL-deduplicated ClickHouse rows for [fromSeq, toSeq]
+// and coalesces contiguous seq_id runs per producer_id.
+func (w *RowBinaryWriter) QuerySequenceRanges(
+	ctx context.Context,
+	tenantID string,
+	partition uint16,
+	fromSeq, toSeq uint64,
+) ([]repository.SequenceRange, error) {
+	if tenantID == "" {
+		return nil, errors.New("tenant_id is required")
+	}
+	if fromSeq > toSeq {
+		return nil, errors.New("from_seq must be <= to_seq")
+	}
+	qc, ok := w.conn.(QueryConn)
+	if !ok {
+		return nil, errors.New("clickhouse connection does not support queries")
+	}
+
+	rows, err := qc.Query(ctx, selectSequenceRangesSQL, tenantID, partition, fromSeq, toSeq)
+	if err != nil {
+		return nil, fmt.Errorf("query clickhouse sequence ranges: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var ranges []repository.SequenceRange
+	for rows.Next() {
+		var producerID string
+		var seqID uint64
+		if err := rows.Scan(&producerID, &seqID); err != nil {
+			return nil, fmt.Errorf("scan clickhouse sequence row: %w", err)
+		}
+		n := len(ranges)
+		if n > 0 && ranges[n-1].ProducerID == producerID {
+			if seqID <= ranges[n-1].MaxSeq {
+				continue
+			}
+			if seqID == ranges[n-1].MaxSeq+1 {
+				ranges[n-1].MaxSeq = seqID
+				continue
+			}
+		}
+		ranges = append(ranges, repository.SequenceRange{
+			ProducerID: producerID,
+			MinSeq:     seqID,
+			MaxSeq:     seqID,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate clickhouse sequence rows: %w", err)
+	}
+	return ranges, nil
 }
 
 // Close closes the underlying ClickHouse connection.
