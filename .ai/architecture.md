@@ -34,11 +34,11 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
   - Caller-side bounded channels in `pkg/auditclient`: read-plane sheds non-essential metadata at $90\%$ fill; write-plane blocks and returns a typed sentinel error (`ErrAuditUnavailable`) which HTTP caller services map to `HTTP 503`.
   - Admin HTTP server rate-limits `POST /v1/reconcile/gaps` via token-bucket middleware to prevent ClickHouse/S3 scan amplification.
 - **Idempotency**:
-  - Partition-scoped monotonic `(producer_id, tenant_id, partition, seq_id)` ordering and `ReplicatedReplacingMergeTree` in ClickHouse prevent duplicate or out-of-order hot-tier ledger rows on consumer rebalances or 60s S3-hold replays. In the cold S3 WORM tier, immutable Parquet objects (`s3://vault/tenant_<id>/<hash>/year=YYYY/.../min_seq-max_seq.parquet`) may span overlapping `[min_seq, max_seq]` ranges across replays; cold-tier readers and reconciliation must deduplicate overlapping intervals and emit an overlap alert when overlaps are detected.
+  - Partition-scoped monotonic `(producer_id, tenant_id, partition, seq_id)` ordering and `ReplicatedReplacingMergeTree` in ClickHouse prevent duplicate or out-of-order hot-tier ledger rows on consumer rebalances or 60s S3-hold replays. Because `ReplicatedReplacingMergeTree` deduplicates asynchronously during background part merges, hot-tier readers must deduplicate at query time using `FINAL` or an equivalent deduplication rule so replay copies are not returned before parts merge. In the cold S3 WORM tier, immutable Parquet objects (`s3://vault/tenant_<id>/<hash>/year=YYYY/.../min_seq-max_seq.parquet`) may span overlapping `[min_seq, max_seq]` ranges across replays; cold-tier readers and reconciliation must deduplicate overlapping intervals and emit an overlap alert when overlaps are detected.
 
 ### Layer 2: Data Persistence & State
 - **Database Migrations**:
-  - Versioned ClickHouse DDL schemas (`ReplicatedReplacingMergeTree` partitioned by `toYYYYMM(event_time)`, ordered by `(tenant_id, event_time, producer_id, seq_id)`).
+  - Versioned ClickHouse DDL schemas (`ReplicatedReplacingMergeTree` partitioned by `toYYYYMM(event_time)`, ordered by `(tenant_id, event_time, producer_id, kafka_partition, seq_id)`).
 - **Atomic Batch Commits (Zero Dual-Write Loss)**:
   - Kafka consumer offsets are committed **only after** ClickHouse confirms RowBinary writes and S3 confirms WORM Parquet `PutObject`. During declared downstream outages (ClickHouse/S3), offset advancement halts and records spool to pod-local `mmap_wal` (`5 GiB` cap) for bounded retry without heap growth.
 - **Connection Pooling**:

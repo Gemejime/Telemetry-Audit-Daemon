@@ -31,11 +31,11 @@ jobs:
             echo "has_go=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Setup Go 1.23+
+      - name: Setup Go 1.25+
         if: steps.go_check.outputs.has_go == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.27.2"
           cache: true
 
       - name: Verify gofmt -s formatting
@@ -88,11 +88,11 @@ jobs:
             echo "has_go=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Setup Go 1.23+
+      - name: Setup Go 1.25+
         if: steps.go_check.outputs.has_go == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.27.2"
           cache: true
 
       - name: Run govulncheck
@@ -120,56 +120,56 @@ jobs:
 
               # 2. Disallow logging sensitive credentials, raw PII/PHI, or auth headers across multi-line slog calls
               python3 - "$dir" <<'PY'
-              import os, re, sys
+          import os, re, sys
 
-              root = sys.argv[1]
-              call_re = re.compile(r'slog\.(Info|Warn|Error|Debug|Log)(?:Context)?\s*\(')
-              sens_re = re.compile(
-                  r'\b(authorization|bearer_token|raw_payload|raw_pii|aws_secret|kms_key_material|clickhouse_password|sasl_password|dsn)\b',
-                  re.IGNORECASE,
-              )
+          root = sys.argv[1]
+          call_re = re.compile(r'slog\.(Info|Warn|Error|Debug|Log)(?:Context)?\s*\(')
+          sens_re = re.compile(
+              r'\b(authorization|bearer_token|raw_payload|raw_pii|aws_secret|kms_key_material|clickhouse_password|sasl_password|dsn)\b',
+              re.IGNORECASE,
+          )
 
-              failed = False
-              for dirpath, _, filenames in os.walk(root):
-                  for fn in filenames:
-                      if not fn.endswith('.go') or fn.endswith('_test.go'):
-                          continue
-                      path = os.path.join(dirpath, fn)
-                      with open(path, 'r', encoding='utf-8') as f:
-                          src = f.read()
-                      for m in call_re.finditer(src):
-                          depth = 1
-                          i = m.end()
-                          in_str = None
-                          escaped = False
-                          while i < len(src) and depth > 0:
-                              ch = src[i]
-                              if in_str == '"':
-                                  if escaped:
-                                      escaped = False
-                                  elif ch == '\\':
-                                      escaped = True
-                                  elif ch == '"':
-                                      in_str = None
-                              elif in_str == '`':
-                                  if ch == '`':
-                                      in_str = None
-                              else:
-                                  if ch in ('"', '`'):
-                                      in_str = ch
-                                  elif ch == '(':
-                                      depth += 1
-                                  elif ch == ')':
-                                      depth -= 1
-                              i += 1
-                          call_text = src[m.start():i]
-                          if sens_re.search(call_text):
-                              line = src.count('\n', 0, m.start()) + 1
-                              print(f"ERROR: Potential unredacted sensitive field in slog call at {path}:{line}")
-                              failed = True
-              if failed:
-                  sys.exit(1)
-              PY
+          failed = False
+          for dirpath, _, filenames in os.walk(root):
+              for fn in filenames:
+                  if not fn.endswith('.go') or fn.endswith('_test.go'):
+                      continue
+                  path = os.path.join(dirpath, fn)
+                  with open(path, 'r', encoding='utf-8') as f:
+                      src = f.read()
+                  for m in call_re.finditer(src):
+                      depth = 1
+                      i = m.end()
+                      in_str = None
+                      escaped = False
+                      while i < len(src) and depth > 0:
+                          ch = src[i]
+                          if in_str == '"':
+                              if escaped:
+                                  escaped = False
+                              elif ch == '\\':
+                                  escaped = True
+                              elif ch == '"':
+                                  in_str = None
+                          elif in_str == '`':
+                              if ch == '`':
+                                  in_str = None
+                          else:
+                              if ch in ('"', '`'):
+                                  in_str = ch
+                              elif ch == '(':
+                                  depth += 1
+                              elif ch == ')':
+                                  depth -= 1
+                          i += 1
+                      call_text = src[m.start():i]
+                      if sens_re.search(call_text):
+                          line = src.count('\n', 0, m.start()) + 1
+                          print(f"ERROR: Potential unredacted sensitive field in slog call at {path}:{line}")
+                          failed = True
+          if failed:
+              sys.exit(1)
+          PY
             fi
           done
           echo "Secured Logging Audit passed."
@@ -242,11 +242,11 @@ jobs:
             echo "has_go=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Setup Go 1.23+
+      - name: Setup Go 1.25+
         if: steps.go_check.outputs.has_go == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.27.2"
           cache: true
 
       - name: Run unit & race-detector test suites

@@ -235,15 +235,15 @@ components:
           minimum: 0
           example: 3
         from_seq:
-          type: integer
-          format: int64
-          minimum: 0
-          example: 100000
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,19})$"
+          description: Inclusive lower sequence bound as a base-10 uint64 decimal string (0 to 18446744073709551615; matches AuditRecord.seq_id ProtoJSON encoding).
+          example: "100000"
         to_seq:
-          type: integer
-          format: int64
-          minimum: 0
-          example: 125000
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,19})$"
+          description: Inclusive upper sequence bound as a base-10 uint64 decimal string (0 to 18446744073709551615; matches AuditRecord.seq_id ProtoJSON encoding).
+          example: "125000"
     CheckedRange:
       type: object
       required:
@@ -251,15 +251,15 @@ components:
         - max_seq
       properties:
         min_seq:
-          type: integer
-          format: int64
-          minimum: 0
-          example: 100000
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,19})$"
+          description: Inclusive start of checked sequence range as a base-10 uint64 decimal string (0 to 18446744073709551615).
+          example: "100000"
         max_seq:
-          type: integer
-          format: int64
-          minimum: 0
-          example: 125000
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,19})$"
+          description: Inclusive end of checked sequence range as a base-10 uint64 decimal string (0 to 18446744073709551615).
+          example: "125000"
     SequenceGap:
       type: object
       required:
@@ -272,15 +272,15 @@ components:
           type: string
           example: search-orch-7f9b
         min_seq:
-          type: integer
-          format: int64
-          minimum: 0
-          example: 100420
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,19})$"
+          description: Inclusive start of missing sequence gap as a base-10 uint64 decimal string (0 to 18446744073709551615).
+          example: "100420"
         max_seq:
-          type: integer
-          format: int64
-          minimum: 0
-          example: 100425
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,19})$"
+          description: Inclusive end of missing sequence gap as a base-10 uint64 decimal string (0 to 18446744073709551615).
+          example: "100425"
         missing_in:
           type: string
           enum:

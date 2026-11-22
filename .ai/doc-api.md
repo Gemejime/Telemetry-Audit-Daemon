@@ -39,13 +39,13 @@ Executes `reconcile_partition_gaps.go` to compare `[min_seq, max_seq]` manifests
   - `Authorization: Bearer <token>` *(redacted in all logs)*
   - `Content-Type: application/json`
   - `X-Request-ID: <ulid|uuid>` *(optional; generated if omitted)*
-- **Request Body**:
+- **Request Body** (sequence fields are base-10 decimal strings representing `uint64` values in `["0", "18446744073709551615"]` to preserve full 64-bit precision in JSON):
 ```json
 {
   "tenant_id": "tenant-corp-01",
   "partition": 3,
-  "from_seq": 100000,
-  "to_seq": 125000
+  "from_seq": "100000",
+  "to_seq": "125000"
 }
 ```
 - **Response `200 OK`**:
@@ -54,14 +54,14 @@ Executes `reconcile_partition_gaps.go` to compare `[min_seq, max_seq]` manifests
   "tenant_id": "tenant-corp-01",
   "partition": 3,
   "checked_range": {
-    "min_seq": 100000,
-    "max_seq": 125000
+    "min_seq": "100000",
+    "max_seq": "125000"
   },
   "gaps": [
     {
       "producer_id": "search-orch-7f9b",
-      "min_seq": 100420,
-      "max_seq": 100425,
+      "min_seq": "100420",
+      "max_seq": "100425",
       "missing_in": "s3"
     }
   ],
@@ -140,7 +140,7 @@ message AuditRecord {
 
 ### ClickHouse Hot Tier (`ReplicatedReplacingMergeTree`)
 - **Ingestion Protocol**: Native TCP RowBinary stream (`1,000 ms` or `2,500` records; P99 $\le 2\text{ s}$).
-- **Deduplication**: `ReplicatedReplacingMergeTree(ingested_at)` makes consumer-rebalance and 60s S3-hold replays idempotent across `(tenant_id, event_time, producer_id, seq_id)`.
+- **Deduplication**: `ReplicatedReplacingMergeTree(ingested_at)` makes consumer-rebalance and 60s S3-hold replays idempotent across `(tenant_id, event_time, producer_id, kafka_partition, seq_id)`. Hot-tier readers must query with `FINAL` (or an equivalent deduplication rule) so replay copies are not returned before background part merges complete.
 - **DDL**:
 ```sql
 CREATE TABLE IF NOT EXISTS audit_compliance_records ON CLUSTER '{cluster}'
@@ -171,7 +171,7 @@ CREATE TABLE IF NOT EXISTS audit_compliance_records ON CLUSTER '{cluster}'
 )
 ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/audit_compliance_records', '{replica}', ingested_at)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (tenant_id, event_time, producer_id, seq_id);
+ORDER BY (tenant_id, event_time, producer_id, kafka_partition, seq_id);
 ```
 
 ### AWS S3 WORM Cold Vault (Parquet + Object Lock)

@@ -3,7 +3,7 @@
 **Status**: Completed  
 **Spec References**:
 - [`GEMINI.md`](../GEMINI.md)
-- [`tasks/RAG Telemetry Audit Daemon Plan.pdf`](../tasks/RAG%20Telemetry%20Audit%20Daemon%20Plan.pdf)
+- RAG Telemetry Audit Daemon Plan (`tasks/RAG Telemetry Audit Daemon Plan.pdf` — excluded from git via `.gitignore`; obtain from the team's internal design archive or refer to the synced `.ai/` specifications below)
 - [`.ai/progress-tracker.md`](../.ai/progress-tracker.md)
 - [`.ai/architecture.md`](../.ai/architecture.md)
 - [`.ai/doc-api.md`](../.ai/doc-api.md)
