@@ -146,3 +146,83 @@ func TestRowBinaryWriter_RejectsInvalidEntryBeforeIO(t *testing.T) {
 		t.Fatalf("expected 0 PrepareBatch calls on validation failure, got %d", conn.prepareCalls)
 	}
 }
+
+type mockRows struct {
+	driver.Rows
+	data []struct {
+		producer string
+		seq      uint64
+	}
+	idx int
+}
+
+func (r *mockRows) Next() bool {
+	if r.idx >= len(r.data) {
+		return false
+	}
+	r.idx++
+	return true
+}
+
+func (r *mockRows) Scan(dest ...any) error {
+	row := r.data[r.idx-1]
+	*(dest[0].(*string)) = row.producer
+	*(dest[1].(*uint64)) = row.seq
+	return nil
+}
+
+func (r *mockRows) Err() error   { return nil }
+func (r *mockRows) Close() error { return nil }
+
+type mockQueryConn struct {
+	mockConn
+	rows      driver.Rows
+	lastQuery string
+}
+
+func (m *mockQueryConn) Query(_ context.Context, query string, _ ...any) (driver.Rows, error) {
+	m.lastQuery = query
+	return m.rows, nil
+}
+
+func TestRowBinaryWriter_QuerySequenceRanges_CoalescesAndDetectsGaps(t *testing.T) {
+	rows := &mockRows{
+		data: []struct {
+			producer string
+			seq      uint64
+		}{
+			{"prod-a", 10},
+			{"prod-a", 11},
+			{"prod-a", 12},
+			{"prod-a", 15}, // gap 13..14
+			{"prod-a", 16},
+			{"prod-b", 1},
+			{"prod-b", 2},
+		},
+	}
+	conn := &mockQueryConn{rows: rows}
+	writer, err := NewRowBinaryWriter(conn, RetryConfig{}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewRowBinaryWriter: %v", err)
+	}
+
+	got, err := writer.QuerySequenceRanges(context.Background(), "tenant-1", 2, 1, 20)
+	if err != nil {
+		t.Fatalf("QuerySequenceRanges: %v", err)
+	}
+	if !strings.Contains(conn.lastQuery, "FINAL") {
+		t.Fatalf("expected FINAL in query, got %s", conn.lastQuery)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 coalesced ranges, got %d: %+v", len(got), got)
+	}
+	if got[0].ProducerID != "prod-a" || got[0].MinSeq != 10 || got[0].MaxSeq != 12 {
+		t.Fatalf("unexpected range[0]: %+v", got[0])
+	}
+	if got[1].ProducerID != "prod-a" || got[1].MinSeq != 15 || got[1].MaxSeq != 16 {
+		t.Fatalf("unexpected range[1]: %+v", got[1])
+	}
+	if got[2].ProducerID != "prod-b" || got[2].MinSeq != 1 || got[2].MaxSeq != 2 {
+		t.Fatalf("unexpected range[2]: %+v", got[2])
+	}
+}
