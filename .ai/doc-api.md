@@ -30,7 +30,7 @@ This document is the authoritative specification for all public and internal int
 #### 1. `GET /healthz`, `GET /ready`, `GET /metrics`
 - `GET /healthz` $\rightarrow$ `200 OK` `{"status": "alive"}`
 - `GET /ready` $\rightarrow$ `200 OK` `{"status": "ready", "checks": {"kafka_consumer": "ok", "clickhouse": "ok", "wal_spillover_active": false}}` or `503 Service Unavailable` (`{"status": "draining"}` during `SIGTERM` shutdown, or `{"status": "not_ready", "checks": {...}}` when Kafka consumer health fails).
-- `GET /metrics` $\rightarrow$ Prometheus exposition format (`text/plain; version=0.0.4`).
+- `GET /metrics` $\rightarrow$ Prometheus exposition format (`text/plain; version=0.0.4`). Exposes `audit_records_consumed_total`, `audit_consumer_lag_records`, `audit_hot_persist_duration_seconds`, `audit_cold_flush_duration_seconds`, `audit_caller_dropped_records_total`, `audit_wal_spillover_active`, `audit_s3_upload_errors_total`, `audit_s3_interval_overlaps_total`, and `audit_malformed_records_total`.
 
 #### 2. `POST /v1/reconcile/gaps`
 Executes `reconcile_partition_gaps.go` to compare `[min_seq, max_seq]` manifests in S3 WORM Parquet metadata against ClickHouse `ReplicatedMergeTree` rows for a given tenant and Kafka partition.
