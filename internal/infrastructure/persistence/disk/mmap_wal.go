@@ -48,15 +48,16 @@ type walSegment struct {
 // MmapWAL implements repository.WALPort using bounded, rotated NVMe segment files
 // with CRC32 record framing and a hard 5 GiB capacity ceiling.
 type MmapWAL struct {
-	mu           sync.Mutex
-	dir          string
-	maxBytes     int64
-	segmentBytes int64
-	totalBytes   int64
-	segments     []*walSegment
-	nextSegID    uint64
-	logger       *slog.Logger
-	closed       bool
+	mu            sync.Mutex
+	dir           string
+	maxBytes      int64
+	segmentBytes  int64
+	totalBytes    int64
+	segments      []*walSegment
+	nextSegID     uint64
+	logger        *slog.Logger
+	closed        bool
+	appendBlocked bool
 }
 
 // NewMmapWAL initializes or recovers a segmented WAL in dir.
@@ -166,6 +167,9 @@ func (w *MmapWAL) Append(ctx context.Context, payload []byte) error {
 	if w.closed {
 		return errors.New("wal is closed")
 	}
+	if w.appendBlocked {
+		return fmt.Errorf("wal append blocked pending recovery: %w", repository.ErrWALCorrupt)
+	}
 	if w.totalBytes+frameLen > w.maxBytes {
 		return repository.ErrWALFull
 	}
@@ -179,10 +183,19 @@ func (w *MmapWAL) Append(ctx context.Context, payload []byte) error {
 	binary.LittleEndian.PutUint32(hdr[0:4], uint32(len(payload))) // #nosec G115 -- payload bounded by segmentBytes/maxBytes
 	binary.LittleEndian.PutUint32(hdr[4:8], crc32.ChecksumIEEE(payload))
 
-	if _, err := seg.backend.WriteAt(hdr[:], seg.writeOffset); err != nil {
+	priorOffset := seg.writeOffset
+	if _, err := seg.backend.WriteAt(hdr[:], priorOffset); err != nil {
+		if truncErr := seg.backend.Truncate(priorOffset); truncErr != nil {
+			w.appendBlocked = true
+			return fmt.Errorf("write wal header: %w (truncate rollback failed: %v)", err, truncErr)
+		}
 		return fmt.Errorf("write wal header: %w", err)
 	}
-	if _, err := seg.backend.WriteAt(payload, seg.writeOffset+frameHeaderSize); err != nil {
+	if _, err := seg.backend.WriteAt(payload, priorOffset+frameHeaderSize); err != nil {
+		if truncErr := seg.backend.Truncate(priorOffset); truncErr != nil {
+			w.appendBlocked = true
+			return fmt.Errorf("write wal payload: %w (truncate rollback failed: %v)", err, truncErr)
+		}
 		return fmt.Errorf("write wal payload: %w", err)
 	}
 
@@ -324,18 +337,6 @@ func (w *MmapWAL) Ack(ctx context.Context, segmentID uint64, offset int64) error
 	for len(w.segments) > 0 {
 		head := w.segments[0]
 		if head.readOffset < head.writeOffset {
-			break
-		}
-		if len(w.segments) == 1 {
-			// Reset the single active segment in-place so totalBytes drops to 0.
-			if head.writeOffset > 0 {
-				if err := head.backend.Truncate(0); err != nil {
-					return fmt.Errorf("truncate drained wal segment %d: %w", head.id, err)
-				}
-				w.totalBytes -= head.writeOffset
-				head.writeOffset = 0
-				head.readOffset = 0
-			}
 			break
 		}
 

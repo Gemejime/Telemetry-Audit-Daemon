@@ -144,7 +144,10 @@ type Client struct {
 	compliance    *complianceChannel
 	diagnostic    *RingBuffer
 
-	closeOnce sync.Once
+	producerCloseOnce sync.Once
+	closeMu           sync.Mutex
+	closeCompleted    bool
+	closeErr          error
 }
 
 // NewClient initializes a dual-channel audit Client with isolated write/read compliance
@@ -271,18 +274,35 @@ func (c *Client) ShedMetadataTotal() uint64 {
 }
 
 // Close gracefully drains in-flight compliance and diagnostic buffers and closes the Kafka producer.
+// If ctx expires before shutdown completes, subsequent Close calls continue waiting for workers
+// and finish any pending diagnostic final flush before returning the terminal shutdown result.
 func (c *Client) Close(ctx context.Context) error {
-	var firstErr error
-	c.closeOnce.Do(func() {
-		if err := c.compliance.Close(ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if err := c.diagnostic.Close(ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		c.producer.Close()
-	})
-	return firstErr
+	c.closeMu.Lock()
+	if c.closeCompleted {
+		err := c.closeErr
+		c.closeMu.Unlock()
+		return err
+	}
+	c.closeMu.Unlock()
+
+	if err := c.compliance.Close(ctx); err != nil {
+		return err
+	}
+	c.producerCloseOnce.Do(c.producer.Close)
+
+	diagErr := c.diagnostic.Close(ctx)
+	if diagErr != nil && ctx.Err() != nil && errors.Is(diagErr, ctx.Err()) {
+		return diagErr
+	}
+
+	c.closeMu.Lock()
+	if !c.closeCompleted {
+		c.closeErr = diagErr
+		c.closeCompleted = true
+	}
+	err := c.closeErr
+	c.closeMu.Unlock()
+	return err
 }
 
 func validateRecord(rec *auditv1.AuditRecord) error {

@@ -11,6 +11,13 @@ import (
 // the daemon's 1.5 GiB RSS ceiling under high-cardinality producer churn.
 const DefaultMaxTrackedStreams = 100_000
 
+const maxMissingIntervalsPerStream = 1024
+
+type seqInterval struct {
+	min uint64
+	max uint64
+}
+
 // StreamKey scopes monotonic sequence tracking to (producer_id, tenant_id, kafka_partition).
 type StreamKey struct {
 	ProducerID     string
@@ -39,6 +46,7 @@ type BatchManifest struct {
 type streamState struct {
 	key             StreamKey
 	expectedNextSeq uint64
+	missing         []seqInterval
 	lastSeen        time.Time
 	elem            *list.Element
 }
@@ -126,13 +134,6 @@ func (t *SequenceTracker) trackStreamLocked(key StreamKey, seqs []uint64, now ti
 	if exists {
 		t.lru.MoveToFront(st.elem)
 		st.lastSeen = now
-		if minSeq > st.expectedNextSeq {
-			manifest.Gaps = append(manifest.Gaps, SequenceGap{
-				Key:    key,
-				MinSeq: st.expectedNextSeq,
-				MaxSeq: minSeq - 1,
-			})
-		}
 	} else {
 		t.evictIfFullLocked()
 		st = &streamState{
@@ -144,7 +145,7 @@ func (t *SequenceTracker) trackStreamLocked(key StreamKey, seqs []uint64, now ti
 		t.states[key] = st
 	}
 
-	// Count cross-batch and intra-batch duplicates, and detect intra-batch gaps.
+	// Count cross-batch and intra-batch duplicates, and detect intra-batch and cross-batch gaps.
 	var prev uint64
 	hasPrev := false
 	if exists && st.expectedNextSeq > 0 {
@@ -153,7 +154,9 @@ func (t *SequenceTracker) trackStreamLocked(key StreamKey, seqs []uint64, now ti
 	}
 	for _, s := range sorted {
 		if exists && s < st.expectedNextSeq {
-			manifest.DuplicateCount++
+			if !st.consumeMissing(s) {
+				manifest.DuplicateCount++
+			}
 			continue
 		}
 		if hasPrev {
@@ -167,6 +170,7 @@ func (t *SequenceTracker) trackStreamLocked(key StreamKey, seqs []uint64, now ti
 					MinSeq: prev + 1,
 					MaxSeq: s - 1,
 				})
+				st.recordMissing(prev+1, s-1)
 			}
 		}
 		prev = s
@@ -178,6 +182,41 @@ func (t *SequenceTracker) trackStreamLocked(key StreamKey, seqs []uint64, now ti
 	}
 
 	return manifest
+}
+
+func (s *streamState) consumeMissing(seq uint64) bool {
+	idx := sort.Search(len(s.missing), func(i int) bool {
+		return s.missing[i].max >= seq
+	})
+	if idx >= len(s.missing) || s.missing[idx].min > seq {
+		return false
+	}
+	iv := s.missing[idx]
+	if iv.min == iv.max {
+		s.missing = append(s.missing[:idx], s.missing[idx+1:]...)
+	} else if seq == iv.min {
+		s.missing[idx].min++
+	} else if seq == iv.max {
+		s.missing[idx].max--
+	} else {
+		s.missing[idx].max = seq - 1
+		if len(s.missing) < maxMissingIntervalsPerStream {
+			right := seqInterval{min: seq + 1, max: iv.max}
+			s.missing = append(s.missing, seqInterval{})
+			copy(s.missing[idx+2:], s.missing[idx+1:])
+			s.missing[idx+1] = right
+		}
+	}
+	return true
+}
+
+func (s *streamState) recordMissing(minSeq, maxSeq uint64) {
+	s.missing = append(s.missing, seqInterval{min: minSeq, max: maxSeq})
+	if len(s.missing) > maxMissingIntervalsPerStream {
+		excess := len(s.missing) - maxMissingIntervalsPerStream
+		copy(s.missing, s.missing[excess:])
+		s.missing = s.missing[:maxMissingIntervalsPerStream]
+	}
 }
 
 func (t *SequenceTracker) evictIfFullLocked() {

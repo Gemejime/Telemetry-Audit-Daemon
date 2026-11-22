@@ -39,8 +39,12 @@ type RingBuffer struct {
 	sink    DiagnosticSink
 	logger  *slog.Logger
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh         chan struct{}
+	closeOnce      sync.Once
+	flusherDone    chan struct{}
+	finalFlushOnce sync.Once
+	finalFlushErr  error
+	wg             sync.WaitGroup
 }
 
 // NewRingBuffer creates a bounded droppable diagnostic ring buffer with background flushing.
@@ -56,11 +60,12 @@ func NewRingBuffer(capacity int, flushInterval time.Duration, sink DiagnosticSin
 	}
 
 	rb := &RingBuffer{
-		buf:      make([]DiagnosticSpan, capacity),
-		capacity: capacity,
-		sink:     sink,
-		logger:   logger,
-		stopCh:   make(chan struct{}),
+		buf:         make([]DiagnosticSpan, capacity),
+		capacity:    capacity,
+		sink:        sink,
+		logger:      logger,
+		stopCh:      make(chan struct{}),
+		flusherDone: make(chan struct{}),
 	}
 
 	rb.wg.Add(1)
@@ -128,24 +133,24 @@ func (r *RingBuffer) DroppedTotal() uint64 {
 
 // Close stops the background flusher and performs a final flush of remaining spans.
 func (r *RingBuffer) Close(ctx context.Context) error {
-	r.mu.Lock()
-	if r.closed {
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		close(r.stopCh)
 		r.mu.Unlock()
-		return nil
-	}
-	r.closed = true
-	close(r.stopCh)
-	r.mu.Unlock()
 
-	done := make(chan struct{})
-	go func() {
-		r.wg.Wait()
-		close(done)
-	}()
+		go func() {
+			r.wg.Wait()
+			close(r.flusherDone)
+		}()
+	})
 
 	select {
-	case <-done:
-		return r.flush(ctx)
+	case <-r.flusherDone:
+		r.finalFlushOnce.Do(func() {
+			r.finalFlushErr = r.flush(ctx)
+		})
+		return r.finalFlushErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -173,14 +178,18 @@ func (r *RingBuffer) runFlusher(interval time.Duration) {
 }
 
 func (r *RingBuffer) flush(ctx context.Context) error {
-	if r.sink == nil {
-		// Drain to prevent unbounded retention when no diagnostic sink is attached.
-		_ = r.Drain(0)
-		return nil
-	}
 	spans := r.Drain(0)
 	if len(spans) == 0 {
 		return nil
 	}
-	return r.sink.Export(ctx, spans)
+	if r.sink == nil {
+		// Drain to prevent unbounded retention when no diagnostic sink is attached.
+		r.dropped.Add(uint64(len(spans)))
+		return nil
+	}
+	if err := r.sink.Export(ctx, spans); err != nil {
+		r.dropped.Add(uint64(len(spans)))
+		return err
+	}
+	return nil
 }

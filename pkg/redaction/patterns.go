@@ -18,7 +18,7 @@ type patternDef struct {
 
 var defaultKeyPatterns = []patternDef{
 	{text: "bearer ", kind: kindBearer},
-	{text: "authorization:", kind: kindAuthHeader},
+	{text: "authorization", kind: kindAuthHeader},
 	{text: "api_key", kind: kindSecretKey},
 	{text: "apikey", kind: kindSecretKey},
 	{text: "x-api-key", kind: kindSecretKey},
@@ -181,12 +181,18 @@ func scanEmail(src []byte, atIdx, minStart int) (start, end int, ok bool) {
 	}
 
 	end = atIdx + 1
-	lastDot := -1
 	for end < len(src) && isEmailDomainChar(src[end]) {
-		if src[end] == '.' {
-			lastDot = end
-		}
 		end++
+	}
+	// Exclude trailing sentence punctuation or hyphens from the domain candidate.
+	for end > atIdx+1 && (src[end-1] == '.' || src[end-1] == '-') {
+		end--
+	}
+	lastDot := -1
+	for j := atIdx + 1; j < end; j++ {
+		if src[j] == '.' {
+			lastDot = j
+		}
 	}
 	if lastDot <= atIdx+1 || end-lastDot-1 < 2 {
 		return 0, 0, false
@@ -272,6 +278,7 @@ func scanCreditCard(src []byte, idx int) (end int, ok bool) {
 	nDigits := 0
 	i := idx
 	lastSep := false
+	bestEnd := 0
 	for i < len(src) && nDigits < 19 {
 		b := src[i]
 		if isDigit(b) {
@@ -282,19 +289,22 @@ func scanCreditCard(src []byte, idx int) (end int, ok bool) {
 			continue
 		}
 		if (b == '-' || b == ' ') && !lastSep && nDigits > 0 && i+1 < len(src) && isDigit(src[i+1]) {
+			if nDigits >= 13 && isWordBoundaryAfter(src, i) && luhnValid(digits[:nDigits]) {
+				bestEnd = i
+			}
 			lastSep = true
 			i++
 			continue
 		}
 		break
 	}
-	if nDigits < 13 || nDigits > 19 || !isWordBoundaryAfter(src, i) {
-		return 0, false
+	if nDigits >= 13 && nDigits <= 19 && isWordBoundaryAfter(src, i) && luhnValid(digits[:nDigits]) {
+		bestEnd = i
 	}
-	if !luhnValid(digits[:nDigits]) {
-		return 0, false
+	if bestEnd > 0 {
+		return bestEnd, true
 	}
-	return i, true
+	return 0, false
 }
 
 func luhnValid(digits []byte) bool {
@@ -360,19 +370,25 @@ func scanPhone(src []byte, idx int) (end int, ok bool) {
 	if b0 != '+' && b0 != '(' && !isDigit(b0) {
 		return 0, false
 	}
+	const maxPhoneScanLen = 32
 	i := idx
 	digits := 0
 	hasSep := b0 == '+' || b0 == '('
+	lastSep := b0 == '+' || b0 == '('
 	if b0 == '+' {
 		i++
 		if i >= len(src) || !isDigit(src[i]) {
 			return 0, false
 		}
+		lastSep = false
+	} else if b0 == '(' {
+		i++
 	}
-	for i < len(src) && digits < 15 {
+	for i < len(src) && digits < 15 && i-idx < maxPhoneScanLen {
 		b := src[i]
 		if isDigit(b) {
 			digits++
+			lastSep = false
 			i++
 			continue
 		}
@@ -385,14 +401,20 @@ func scanPhone(src []byte, idx int) (end int, ok bool) {
 			} else {
 				hasSep = true
 			}
+			// Reject consecutive formatting chars early except ") " / ")-" or " (".
+			if lastSep && !(src[i-1] == ')' && (b == ' ' || b == '-')) && !(src[i-1] == ' ' && b == '(') {
+				break
+			}
 			// Do not consume trailing space/punctuation at end of number.
 			if i+1 >= len(src) || (!isDigit(src[i+1]) && src[i+1] != '(' && src[i+1] != ' ') {
 				if b == ')' && digits >= 3 && i+1 < len(src) && (src[i+1] == ' ' || src[i+1] == '-' || isDigit(src[i+1])) {
+					lastSep = true
 					i++
 					continue
 				}
 				break
 			}
+			lastSep = true
 			i++
 			continue
 		}
@@ -458,20 +480,21 @@ func scanSecretAfterKey(src []byte, matchStart, matchEnd int, kind patternKind) 
 		if i < len(src) && (src[i] == '"' || src[i] == '\'') {
 			i++
 		}
-		for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+		allowNewline := kind == kindSecretKey
+		for i < len(src) && isKeyValueWS(src[i], allowNewline) {
 			i++
 		}
 		if i >= len(src) || (src[i] != ':' && src[i] != '=') {
 			return 0, 0, false
 		}
 		i++
-		for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+		for i < len(src) && isKeyValueWS(src[i], allowNewline) {
 			i++
 		}
 		if i >= len(src) {
 			return 0, 0, false
 		}
-		// Quoted value (e.g. JSON "password": "secret")
+		// Quoted value (e.g. JSON "password": "secret" or "Authorization": "Bearer xxx")
 		if src[i] == '"' || src[i] == '\'' {
 			quote := src[i]
 			i++
@@ -486,24 +509,30 @@ func scanSecretAfterKey(src []byte, matchStart, matchEnd int, kind patternKind) 
 			if i == valStart || i >= len(src) {
 				return 0, 0, false
 			}
+			if kind == kindAuthHeader {
+				valStart = skipBearerSchemePrefix(src, valStart, i)
+				if valStart >= i {
+					return 0, 0, false
+				}
+			}
 			return valStart, i, true
 		}
-		// Unquoted value (e.g. Authorization: Bearer xxx or api_key=abc123)
+		// Unquoted value (e.g. Authorization: Bearer xxx / Basic xxx or api_key=abc123)
 		valStart = i
 		if kind == kindAuthHeader {
-			// Check for "Bearer <token>" or "Basic <token>"
 			for i < len(src) && src[i] != '\r' && src[i] != '\n' && src[i] != ',' && src[i] != '"' {
 				i++
 			}
 			for i > valStart && (src[i-1] == ' ' || src[i-1] == '\t') {
 				i--
 			}
-			if i == valStart {
+			valStart = skipBearerSchemePrefix(src, valStart, i)
+			if i <= valStart {
 				return 0, 0, false
 			}
 			return valStart, i, true
 		}
-		for i < len(src) && isTokenChar(src[i]) {
+		for i < len(src) && !isKVDelimiter(src[i]) {
 			i++
 		}
 		if i == valStart {
@@ -512,4 +541,40 @@ func scanSecretAfterKey(src []byte, matchStart, matchEnd int, kind patternKind) 
 		return valStart, i, true
 	}
 	return 0, 0, false
+}
+
+func isKeyValueWS(b byte, allowNewline bool) bool {
+	if b == ' ' || b == '\t' {
+		return true
+	}
+	return allowNewline && (b == '\r' || b == '\n')
+}
+
+func isKVDelimiter(b byte) bool {
+	switch b {
+	case ' ', '\t', '\r', '\n', ',', ';', '"', '\'', ')', ']', '}':
+		return true
+	default:
+		return false
+	}
+}
+
+func skipBearerSchemePrefix(src []byte, valStart, valEnd int) int {
+	const bearer = "bearer"
+	if valEnd-valStart <= len(bearer) {
+		return valStart
+	}
+	for j := 0; j < len(bearer); j++ {
+		if toLowerASCII(src[valStart+j]) != bearer[j] {
+			return valStart
+		}
+	}
+	if src[valStart+len(bearer)] != ' ' && src[valStart+len(bearer)] != '\t' {
+		return valStart
+	}
+	p := valStart + len(bearer)
+	for p < valEnd && (src[p] == ' ' || src[p] == '\t') {
+		p++
+	}
+	return p
 }

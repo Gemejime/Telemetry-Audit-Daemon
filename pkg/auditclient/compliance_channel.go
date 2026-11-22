@@ -48,10 +48,13 @@ type complianceChannel struct {
 	droppedRead atomic.Uint64
 	shedRead    atomic.Uint64
 
-	mu     sync.RWMutex
-	closed bool
-	doneCh chan struct{}
-	wg     sync.WaitGroup
+	mu          sync.Mutex
+	closed      bool
+	closeOnce   sync.Once
+	doneCh      chan struct{}
+	workersDone chan struct{}
+	enqueueWG   sync.WaitGroup
+	wg          sync.WaitGroup
 }
 
 func newComplianceChannel(cfg complianceConfig) *complianceChannel {
@@ -64,6 +67,7 @@ func newComplianceChannel(cfg complianceConfig) *complianceChannel {
 		writeQueue:   make(chan writeRequest, cfg.writeQueueSize),
 		readQueue:    make(chan readItem, cfg.readQueueSize),
 		doneCh:       make(chan struct{}),
+		workersDone:  make(chan struct{}),
 	}
 
 	c.wg.Add(2)
@@ -73,30 +77,33 @@ func newComplianceChannel(cfg complianceConfig) *complianceChannel {
 }
 
 func (c *complianceChannel) enqueueWrite(ctx context.Context, rec *auditv1.AuditRecord, partition int32) error {
-	c.mu.RLock()
+	c.mu.Lock()
 	if c.closed {
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		return ErrClientClosed
 	}
+	c.enqueueWG.Add(1)
+	c.mu.Unlock()
+
+	reqCtx, cancel := context.WithTimeout(ctx, c.writeTimeout)
+	defer cancel()
+
 	resCh := make(chan error, 1)
 	req := writeRequest{
-		ctx:       ctx,
+		ctx:       reqCtx,
 		rec:       rec,
 		partition: partition,
 		resultCh:  resCh,
 	}
 
-	timer := time.NewTimer(c.writeTimeout)
-	defer timer.Stop()
-
 	select {
 	case c.writeQueue <- req:
-		c.mu.RUnlock()
-	case <-ctx.Done():
-		c.mu.RUnlock()
-		return fmt.Errorf("%w: context canceled", ErrAuditUnavailable)
-	case <-timer.C:
-		c.mu.RUnlock()
+		c.enqueueWG.Done()
+	case <-reqCtx.Done():
+		c.enqueueWG.Done()
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: context canceled", ErrAuditUnavailable)
+		}
 		c.logger.Error("write-plane compliance queue full",
 			slog.String("trace_id", rec.TraceId),
 			slog.String("tenant_id", rec.TenantId),
@@ -104,27 +111,30 @@ func (c *complianceChannel) enqueueWrite(ctx context.Context, rec *auditv1.Audit
 		)
 		return fmt.Errorf("%w: write queue timeout", ErrAuditUnavailable)
 	case <-c.doneCh:
-		c.mu.RUnlock()
+		c.enqueueWG.Done()
 		return ErrClientClosed
 	}
 
 	select {
 	case err := <-resCh:
 		return err
-	case <-ctx.Done():
-		return fmt.Errorf("%w: context canceled", ErrAuditUnavailable)
-	case <-timer.C:
+	case <-reqCtx.Done():
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: context canceled", ErrAuditUnavailable)
+		}
 		return fmt.Errorf("%w: write ack timeout", ErrAuditUnavailable)
 	}
 }
 
 func (c *complianceChannel) enqueueRead(_ context.Context, rec *auditv1.AuditRecord, partition int32) error {
-	c.mu.RLock()
+	c.mu.Lock()
 	if c.closed {
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		return ErrClientClosed
 	}
-	defer c.mu.RUnlock()
+	c.enqueueWG.Add(1)
+	c.mu.Unlock()
+	defer c.enqueueWG.Done()
 
 	qCap := cap(c.readQueue)
 	qLen := len(c.readQueue)
@@ -157,6 +167,10 @@ func (c *complianceChannel) enqueueRead(_ context.Context, rec *auditv1.AuditRec
 func (c *complianceChannel) runWriteWorker() {
 	defer c.wg.Done()
 	for req := range c.writeQueue {
+		if err := req.ctx.Err(); err != nil {
+			req.resultCh <- fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
+			continue
+		}
 		err := c.publish(req.ctx, req.rec, req.partition)
 		if err != nil {
 			req.resultCh <- fmt.Errorf("%w: publish failed", ErrAuditUnavailable)
@@ -171,6 +185,7 @@ func (c *complianceChannel) runReadWorker() {
 	for item := range c.readQueue {
 		ctx, cancel := context.WithTimeout(context.Background(), c.writeTimeout)
 		if err := c.publish(ctx, item.rec, item.partition); err != nil {
+			c.droppedRead.Add(1)
 			c.logger.Error("read-plane compliance publish failed",
 				slog.String("trace_id", item.rec.TraceId),
 				slog.String("tenant_id", item.rec.TenantId),
@@ -215,25 +230,23 @@ func (c *complianceChannel) ShedTotal() uint64 {
 }
 
 func (c *complianceChannel) Close(ctx context.Context) error {
-	c.mu.Lock()
-	if c.closed {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		close(c.doneCh)
 		c.mu.Unlock()
-		return nil
-	}
-	c.closed = true
-	close(c.doneCh)
-	close(c.writeQueue)
-	close(c.readQueue)
-	c.mu.Unlock()
 
-	done := make(chan struct{})
-	go func() {
-		c.wg.Wait()
-		close(done)
-	}()
+		go func() {
+			c.enqueueWG.Wait()
+			close(c.writeQueue)
+			close(c.readQueue)
+			c.wg.Wait()
+			close(c.workersDone)
+		}()
+	})
 
 	select {
-	case <-done:
+	case <-c.workersDone:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
