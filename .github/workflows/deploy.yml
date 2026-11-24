@@ -1,0 +1,122 @@
+name: CD - Secret Injection & Helm Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "pkg/**"
+      - "api/**"
+      - "deployments/helm/**"
+      - "deployments/docker/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target GitHub deployment environment"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - staging
+          - production
+      namespace:
+        description: "Target Kubernetes namespace"
+        required: true
+        default: "audit-system"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Inject Secrets & Deploy Helm Chart
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'production' }}
+    env:
+      NAMESPACE: ${{ inputs.namespace || 'audit-system' }}
+      SECRET_NAME: rag-telemetry-audit-daemon-secrets
+      RELEASE_NAME: rag-telemetry-audit-daemon
+      CHART_PATH: deployments/helm/rag-telemetry-audit-daemon
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          if [ -z "$KUBE_CONFIG_DATA" ]; then
+            echo "ERROR: KUBE_CONFIG_DATA secret is not configured." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG_DATA" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Validate required runtime secrets
+        env:
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          AUTH_JWT_SECRET: ${{ secrets.AUTH_JWT_SECRET }}
+        run: |
+          missing=0
+          if [ -z "$CLICKHOUSE_PASSWORD" ]; then
+            echo "ERROR: CLICKHOUSE_PASSWORD secret is required." >&2
+            missing=1
+          fi
+          if [ -z "$AUTH_JWT_SECRET" ]; then
+            echo "ERROR: AUTH_JWT_SECRET secret is required." >&2
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Ensure target namespace exists
+        run: |
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Inject Kubernetes Secrets (idempotent)
+        env:
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          AUTH_JWT_SECRET: ${{ secrets.AUTH_JWT_SECRET }}
+          STATIC_ADMIN_TOKEN: ${{ secrets.STATIC_ADMIN_TOKEN }}
+        run: |
+          args=(
+            create secret generic "$SECRET_NAME"
+            --namespace "$NAMESPACE"
+            --from-literal="CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD"
+            --from-literal="AUTH_JWT_SECRET=$AUTH_JWT_SECRET"
+          )
+          if [ -n "$STATIC_ADMIN_TOKEN" ]; then
+            args+=(--from-literal="STATIC_ADMIN_TOKEN=$STATIC_ADMIN_TOKEN")
+          fi
+          kubectl "${args[@]}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Lint and deploy Helm chart
+        run: |
+          helm lint "$CHART_PATH"
+          helm upgrade --install "$RELEASE_NAME" "$CHART_PATH" \
+            --namespace "$NAMESPACE" \
+            --values "$CHART_PATH/values.yaml" \
+            --wait \
+            --timeout 5m
+
+      - name: Verify deployment rollout
+        run: |
+          kubectl rollout status "deployment/$RELEASE_NAME" \
+            --namespace "$NAMESPACE" \
+            --timeout=180s
