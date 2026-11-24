@@ -13,6 +13,7 @@ import (
 
 	"rag-telemetry-audit-daemon/internal/application/query"
 	"rag-telemetry-audit-daemon/internal/domain/repository"
+	"rag-telemetry-audit-daemon/internal/infrastructure/config"
 	"rag-telemetry-audit-daemon/internal/infrastructure/observability"
 	"rag-telemetry-audit-daemon/internal/infrastructure/persistence/clickhouse"
 	"rag-telemetry-audit-daemon/internal/infrastructure/persistence/s3"
@@ -40,6 +41,10 @@ func main() {
 
 func runCLI(args []string, stdout, stderr io.Writer) int {
 	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := config.LoadDotEnv(); err != nil {
+		logger.Error("failed to load .env file", slog.String("error", err.Error()))
+		return 1
+	}
 
 	fs := flag.NewFlagSet("ledger-verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -52,7 +57,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opts.s3Bucket, "s3-bucket", os.Getenv("S3_BUCKET"), "S3 WORM vault bucket name")
 	fs.StringVar(&opts.s3Region, "s3-region", envOr("S3_REGION", "us-east-1"), "AWS S3 region")
 	fs.StringVar(&opts.s3Endpoint, "s3-endpoint", os.Getenv("S3_ENDPOINT"), "Optional S3 endpoint override")
-	fs.BoolVar(&opts.s3PathStyle, "s3-path-style", false, "Use S3 path-style addressing")
+	fs.BoolVar(&opts.s3PathStyle, "s3-path-style", envBoolOr("S3_USE_PATH_STYLE", false), "Use S3 path-style addressing")
 	fs.StringVar(&opts.chAddr, "clickhouse-addr", envOr("CLICKHOUSE_ADDR", "localhost:9000"), "ClickHouse native TCP address")
 	fs.StringVar(&opts.chDatabase, "clickhouse-db", envOr("CLICKHOUSE_DATABASE", "default"), "ClickHouse database")
 	fs.StringVar(&opts.chUser, "clickhouse-user", envOr("CLICKHOUSE_USER", "default"), "ClickHouse username")
@@ -183,6 +188,15 @@ func executeVerify(
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envBoolOr(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
 	}
 	return def
 }

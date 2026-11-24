@@ -30,6 +30,7 @@ import (
 	"rag-telemetry-audit-daemon/internal/application/command"
 	"rag-telemetry-audit-daemon/internal/application/query"
 	"rag-telemetry-audit-daemon/internal/domain/entity"
+	"rag-telemetry-audit-daemon/internal/infrastructure/config"
 	"rag-telemetry-audit-daemon/internal/infrastructure/kafka"
 	"rag-telemetry-audit-daemon/internal/infrastructure/observability"
 	"rag-telemetry-audit-daemon/internal/infrastructure/persistence/clickhouse"
@@ -46,6 +47,9 @@ import (
 // Provide KAFKA_BROKERS, CLICKHOUSE_ADDR, and S3_ENDPOINT via environment
 // (e.g. CI service containers or docker compose) to run.
 func TestIntegration_EndToEndKafkaClickHouseS3WORMAndRebalance(t *testing.T) {
+	if err := config.LoadDotEnv(); err != nil {
+		t.Fatalf("load .env: %v", err)
+	}
 	kafkaBroker := os.Getenv("KAFKA_BROKERS")
 	chAddr := os.Getenv("CLICKHOUSE_ADDR")
 	s3Endpoint := os.Getenv("S3_ENDPOINT")

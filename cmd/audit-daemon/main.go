@@ -14,6 +14,7 @@ import (
 	"rag-telemetry-audit-daemon/internal/application/command"
 	"rag-telemetry-audit-daemon/internal/application/query"
 	"rag-telemetry-audit-daemon/internal/domain/entity"
+	"rag-telemetry-audit-daemon/internal/infrastructure/config"
 	"rag-telemetry-audit-daemon/internal/infrastructure/kafka"
 	"rag-telemetry-audit-daemon/internal/infrastructure/observability"
 	"rag-telemetry-audit-daemon/internal/infrastructure/persistence/clickhouse"
@@ -37,6 +38,10 @@ func (r *daemonReadiness) IsWALSpilloverActive() bool               { return r.w
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := config.LoadDotEnv(); err != nil {
+		logger.Error("failed to load .env file", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -55,12 +60,13 @@ func main() {
 	defer func() { _ = wal.Close() }()
 
 	chClient, err := clickhouse.NewClient(clickhouse.Config{
-		Addr:       splitCSV(envOrDefault("CLICKHOUSE_ADDR", "localhost:9000")),
-		Database:   envOrDefault("CLICKHOUSE_DATABASE", "default"),
-		Username:   envOrDefault("CLICKHOUSE_USER", "default"),
-		Password:   os.Getenv("CLICKHOUSE_PASSWORD"),
-		TLSEnabled: envBoolOrDefault("CLICKHOUSE_TLS", false),
-		Logger:     logger,
+		Addr:                  splitCSV(envOrDefault("CLICKHOUSE_ADDR", "localhost:9000")),
+		Database:              envOrDefault("CLICKHOUSE_DATABASE", "default"),
+		Username:              envOrDefault("CLICKHOUSE_USER", "default"),
+		Password:              os.Getenv("CLICKHOUSE_PASSWORD"),
+		TLSEnabled:            envBoolOrDefault("CLICKHOUSE_TLS", false),
+		TLSInsecureSkipVerify: envBoolOrDefault("CLICKHOUSE_TLS_INSECURE_SKIP_VERIFY", false),
+		Logger:                logger,
 	})
 	if err != nil {
 		logger.Error("failed to initialize clickhouse client", slog.String("error", err.Error()))
