@@ -18,10 +18,11 @@ spec:
         {{- if .Values.canary.enabled }}
         track: canary
         {{- end }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "rag-telemetry-audit-daemon.serviceAccountName" . }}
       securityContext:
@@ -40,11 +41,10 @@ spec:
             - name: metrics
               containerPort: {{ .Values.service.metricsPort }}
               protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "rag-telemetry-audit-daemon.fullname" . }}-config
           env:
-            {{- range $k, $v := .Values.env }}
-            - name: {{ $k }}
-              value: {{ $v | quote }}
-            {{- end }}
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef:
