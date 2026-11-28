@@ -88,7 +88,7 @@ def update_values_yaml(values_path: Path, env_map: Dict[str, str], secret_name: 
 
     pattern = re.compile(r"^env:\s*\r?\n(?:(?:[ \t]+.*|\s*)\r?\n)*", re.MULTILINE)
     if pattern.search(original):
-        updated = pattern.sub(new_block, original, count=1)
+        updated = pattern.sub(lambda _: new_block, original, count=1)
     else:
         sep = "" if original.endswith("\n") else "\n"
         updated = original + sep + "\n" + new_block

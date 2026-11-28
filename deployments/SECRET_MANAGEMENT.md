@@ -57,16 +57,19 @@ Configure these under **Settings $\rightarrow$ Environments $\rightarrow$ `produ
 
 ---
 
-## 4. Secret Rotation & Zero-Downtime Rollout
+## 4. Secret Rotation & Rollout Procedure
 
-Because Kubernetes does not automatically restart pods when a `Secret` mounted via `env.secretKeyRef` changes:
+Because Kubernetes does not automatically restart pods when a `Secret` mounted via `env.secretKeyRef` changes, and the HTTP server currently verifies `AUTH_JWT_SECRET` with a single active key:
 
-1. Update the secret value in **GitHub Actions Environment Secrets** (and in ClickHouse / token issuers as needed).
-2. Re-run the `CD - Secret Injection & Helm Deploy` workflow (or update the Secret in-cluster) and trigger a rolling restart:
-   ```bash
-   kubectl rollout restart deployment/rag-telemetry-audit-daemon -n audit-system
-   kubectl rollout status deployment/rag-telemetry-audit-daemon -n audit-system
-   ```
+1. **Expect a brief JWT rejection window during `AUTH_JWT_SECRET` rotation**: tokens signed with the old key fail validation once pods restart with the new key, and tokens signed with the new key fail validation on pods still running with the old key.
+2. **Required cutover order**:
+   1. Update the secret value in **GitHub Actions Environment Secrets** (and in ClickHouse / Kafka as needed).
+   2. Re-run the `CD - Secret Injection & Helm Deploy` workflow (or update the Secret in-cluster) and wait for all StatefulSet pods to roll out:
+      ```bash
+      kubectl rollout restart statefulset/rag-telemetry-audit-daemon -n audit-system
+      kubectl rollout status statefulset/rag-telemetry-audit-daemon -n audit-system
+      ```
+   3. Switch token issuers to sign new `AUTH_JWT_SECRET` tokens immediately after the StatefulSet rollout completes (or during a scheduled maintenance window).
 
 ---
 

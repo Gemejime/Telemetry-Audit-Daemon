@@ -70,6 +70,7 @@ existingSecret: "rag-telemetry-audit-daemon-secrets"
 
 walVolume:
   sizeLimit: 10Gi
+  storageClassName: ""
 
 service:
   type: ClusterIP
@@ -101,8 +102,13 @@ networkPolicy:
   clickhousePort: 9440
   clickhouseEgressCIDRs:
     - 0.0.0.0/0
+  # s3EgressCIDRs controls TCP 443 egress for S3 (and AWS STS when using IRSA).
+  # 0.0.0.0/0 explicitly allows unrestricted TCP 443 egress; [] omits the rule.
+  # When narrowing s3EgressCIDRs to S3 VPC endpoint/prefix CIDRs, also include AWS STS CIDRs on TCP 443 for IRSA.
   s3EgressCIDRs:
     - 0.0.0.0/0
+  # Optional TCP 80 CIDRs for AWS EC2 IMDS (169.254.169.254/32) and EKS Pod Identity agent (169.254.170.23/32).
+  awsCredentialEgressCIDRs: []
 
 prometheusRule:
   enabled: true

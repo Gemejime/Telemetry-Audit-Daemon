@@ -1,10 +1,11 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "rag-telemetry-audit-daemon.fullname" . }}
   labels:
     {{- include "rag-telemetry-audit-daemon.labels" . | nindent 4 }}
 spec:
+  serviceName: {{ include "rag-telemetry-audit-daemon.fullname" . }}
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
@@ -90,8 +91,15 @@ spec:
           volumeMounts:
             - name: wal-spillover
               mountPath: {{ .Values.env.WAL_DIR }}
-      volumes:
-        - name: wal-spillover
-          emptyDir:
-            medium: ""
-            sizeLimit: {{ .Values.walVolume.sizeLimit }}
+  volumeClaimTemplates:
+    - metadata:
+        name: wal-spillover
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.walVolume.storageClassName }}
+        storageClassName: {{ .Values.walVolume.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.walVolume.sizeLimit }}

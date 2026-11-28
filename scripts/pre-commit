@@ -1,0 +1,24 @@
+#!/bin/sh
+# Pre-commit hook: enforce zero drift between .env.prod and Helm values.yaml.
+
+PY_CMD=""
+for candidate in "python" "python3" "py -3"; do
+  if $candidate -c "import sys" >/dev/null 2>&1; then
+    PY_CMD="$candidate"
+    break
+  fi
+done
+
+if [ -z "$PY_CMD" ]; then
+  echo "ERROR: Python is required to run scripts/sync_env_to_deployments.py --check-only." >&2
+  exit 1
+fi
+
+$PY_CMD scripts/sync_env_to_deployments.py --check-only
+STATUS=$?
+if [ $STATUS -ne 0 ]; then
+  echo "" >&2
+  echo "Commit aborted: .env.prod and deployments/helm/rag-telemetry-audit-daemon/values.yaml are out of sync." >&2
+  echo "Run: python scripts/sync_env_to_deployments.py --sync" >&2
+  exit 1
+fi
