@@ -26,6 +26,8 @@ def configure_utf8_stdio() -> None:
 
 def is_sensitive_key(key: str) -> bool:
     upper = key.upper()
+    if upper == "KAFKA_SASL_USERNAME":
+        return True
     return any(keyword in upper for keyword in SENSITIVE_KEYWORDS)
 
 

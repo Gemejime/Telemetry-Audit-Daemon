@@ -3,14 +3,20 @@
 
 PY_CMD=""
 for candidate in "python" "python3" "py -3"; do
-  if $candidate -c "import sys" >/dev/null 2>&1; then
+  if $candidate -c "import sys, yaml; assert sys.version_info >= (3, 0)" >/dev/null 2>&1; then
     PY_CMD="$candidate"
     break
   fi
 done
 
 if [ -z "$PY_CMD" ]; then
-  echo "ERROR: Python is required to run scripts/sync_env_to_deployments.py --check-only." >&2
+  echo "ERROR: Python 3 with PyYAML is required to run scripts/sync_env_to_deployments.py --check-only." >&2
+  exit 1
+fi
+
+VALUES_FILE="deployments/helm/rag-telemetry-audit-daemon/values.yaml"
+if ! git diff --quiet -- "$VALUES_FILE"; then
+  echo "Commit aborted: $VALUES_FILE has unstaged changes; stage or discard them before committing." >&2
   exit 1
 fi
 

@@ -93,13 +93,13 @@ make openapi-lint # Spectral lint on api/openapi/openapi.yaml
 ## Production Deployment & Env Sync
 
 1. Edit `.env.prod` with production non-sensitive settings.
-2. Sync `.env.prod` to Helm `values.yaml` (sensitive keys containing `PASSWORD`, `SECRET`, `TOKEN`, or `KEY` — including `S3_KMS_KEY_ID` — are automatically excluded):
+2. Sync `.env.prod` to Helm `values.yaml` (sensitive keys containing `PASSWORD`, `SECRET`, `TOKEN`, or `KEY` — including `S3_KMS_KEY_ID` — as well as `KAFKA_SASL_USERNAME` are automatically excluded):
    ```bash
    python scripts/sync_env_to_deployments.py --sync
    python scripts/sync_env_to_deployments.py --check-only
    ```
 3. Install the tracked Git `pre-commit` hook from [`scripts/pre-commit`](scripts/pre-commit) to enforce zero drift between `.env.prod` and `deployments/helm/rag-telemetry-audit-daemon/values.yaml`:
    ```bash
-   cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+   HOOK_PATH="$(git rev-parse --git-path hooks/pre-commit)" && cp scripts/pre-commit "$HOOK_PATH" && chmod +x "$HOOK_PATH"
    ```
 4. CI/CD (`.github/workflows/deploy.yml`) injects `CLICKHOUSE_PASSWORD`, `AUTH_JWT_SECRET`, and optional `STATIC_ADMIN_TOKEN` into the `rag-telemetry-audit-daemon-secrets` Kubernetes Secret, passes the non-secret `S3_KMS_KEY_ID` GitHub repository/environment variable (`vars.S3_KMS_KEY_ID`, when set) to Helm as `env.S3_KMS_KEY_ID` (rendered into the ConfigMap/pod environment), and deploys the Helm chart.
