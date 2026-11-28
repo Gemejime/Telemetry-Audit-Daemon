@@ -98,8 +98,14 @@ make openapi-lint # Spectral lint on api/openapi/openapi.yaml
    python scripts/sync_env_to_deployments.py --sync
    python scripts/sync_env_to_deployments.py --check-only
    ```
-3. Install the tracked Git `pre-commit` hook from [`scripts/pre-commit`](scripts/pre-commit) to enforce zero drift between `.env.prod` and `deployments/helm/rag-telemetry-audit-daemon/values.yaml`:
+3. Install the tracked Git `pre-commit` hook from [`scripts/pre-commit`](scripts/pre-commit) to enforce zero drift between `.env.prod` and `deployments/helm/rag-telemetry-audit-daemon/values.yaml` (without overwriting an existing hook):
    ```bash
-   HOOK_PATH="$(git rev-parse --git-path hooks/pre-commit)" && cp scripts/pre-commit "$HOOK_PATH" && chmod +x "$HOOK_PATH"
+   HOOK_PATH="$(git rev-parse --git-path hooks/pre-commit)"
+   if [ -e "$HOOK_PATH" ]; then
+     echo "Existing pre-commit hook found at $HOOK_PATH; chain scripts/pre-commit from it instead of overwriting."
+   else
+     cp scripts/pre-commit "$HOOK_PATH" && chmod +x "$HOOK_PATH"
+   fi
    ```
+   If you already have a `pre-commit` hook at `$HOOK_PATH`, invoke `"$(git rev-parse --show-toplevel)/scripts/pre-commit" || exit 1` from within your existing hook to chain the drift check with your current checks.
 4. CI/CD (`.github/workflows/deploy.yml`) injects `CLICKHOUSE_PASSWORD`, `AUTH_JWT_SECRET`, and optional `STATIC_ADMIN_TOKEN` into the `rag-telemetry-audit-daemon-secrets` Kubernetes Secret, passes the non-secret `S3_KMS_KEY_ID` GitHub repository/environment variable (`vars.S3_KMS_KEY_ID`, when set) to Helm as `env.S3_KMS_KEY_ID` (rendered into the ConfigMap/pod environment), and deploys the Helm chart.
