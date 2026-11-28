@@ -20,9 +20,10 @@ import (
 
 // RawKafkaRecord represents an unparsed Kafka message from audit-compliance-records.
 type RawKafkaRecord struct {
-	Partition uint16
-	Offset    uint64
-	Value     []byte
+	Partition              uint16
+	Offset                 uint64
+	Value                  []byte
+	AuthenticatedPrincipal string
 }
 
 // walEnvelope preserves redacted ComplianceEntry fields and target tier flags in mmap_wal.
@@ -35,21 +36,24 @@ type walEnvelope struct {
 // ProcessKafkaBatch decodes, validates, redacts in-flight, tracks sequence continuity,
 // dispatches to ClickHouse and S3 flushers, and spills to mmap_wal on downstream failures.
 type ProcessKafkaBatch struct {
-	redactor        *redaction.Engine
-	seqTrack        *entity.SequenceTracker
-	hot             *HotFlusher
-	cold            *ColdFlusher
-	hotStore        repository.HotStorePort
-	coldStore       repository.ColdStorePort
-	wal             repository.WALPort
-	logger          *slog.Logger
-	metrics         *observability.Metrics
-	producerTenants map[string]string
+	redactor             *redaction.Engine
+	seqTrack             *entity.SequenceTracker
+	hot                  *HotFlusher
+	cold                 *ColdFlusher
+	hotStore             repository.HotStorePort
+	coldStore            repository.ColdStorePort
+	wal                  repository.WALPort
+	logger               *slog.Logger
+	metrics              *observability.Metrics
+	producerTenants      map[string]string
+	requireTenantBinding bool
 }
 
 // SetProducerTenantBindings configures a trusted producer_id -> tenant_id registry
 // enforced during batch ingestion before records reach either flusher.
+// Calling this method enables strict binding enforcement so an empty registry fails closed.
 func (p *ProcessKafkaBatch) SetProducerTenantBindings(bindings map[string]string) {
+	p.requireTenantBinding = true
 	if len(bindings) == 0 {
 		p.producerTenants = nil
 		return
@@ -132,13 +136,29 @@ func (p *ProcessKafkaBatch) Handle(ctx context.Context, records []RawKafkaRecord
 			continue
 		}
 
-		if len(p.producerTenants) > 0 {
-			expectedTenant, ok := p.producerTenants[entry.ProducerID]
+		if rec.AuthenticatedPrincipal != "" && rec.AuthenticatedPrincipal != entry.ProducerID {
+			p.metrics.IncMalformedRecords(1)
+			p.logger.Warn("skipping audit record with spoofed producer_id",
+				slog.String("trace_id", entry.TraceID),
+				slog.String("authenticated_principal", rec.AuthenticatedPrincipal),
+				slog.String("producer_id", entry.ProducerID),
+				slog.Uint64("partition", uint64(rec.Partition)),
+				slog.Uint64("offset", rec.Offset),
+			)
+			continue
+		}
+
+		if p.requireTenantBinding || len(p.producerTenants) > 0 {
+			identity := rec.AuthenticatedPrincipal
+			if identity == "" {
+				identity = entry.ProducerID
+			}
+			expectedTenant, ok := p.producerTenants[identity]
 			if !ok || expectedTenant != entry.TenantID {
 				p.metrics.IncMalformedRecords(1)
 				p.logger.Warn("skipping audit record with untrusted producer-to-tenant binding",
 					slog.String("trace_id", entry.TraceID),
-					slog.String("producer_id", entry.ProducerID),
+					slog.String("producer_id", identity),
 					slog.Uint64("partition", uint64(rec.Partition)),
 					slog.Uint64("offset", rec.Offset),
 				)

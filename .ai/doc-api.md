@@ -191,4 +191,4 @@ ORDER BY (tenant_id, event_time, producer_id, kafka_partition, seq_id);
 
 ## Ingestion Configuration & Validation Notes
 
-- `PRODUCER_TENANT_BINDINGS` (optional CSV of `producer_id=tenant_id` pairs): when configured, `ProcessKafkaBatch` rejects records whose `producer_id` is unbound or mismatched against the payload `tenant_id`, increments `audit_malformed_records_total`, and logs only redacted metadata.
+- `PRODUCER_TENANT_BINDINGS` (optional CSV of `producer_id=tenant_id` pairs): when configured, `ProcessKafkaBatch` rejects records whose `producer_id` (or transport-authenticated `AuthenticatedPrincipal`, when provided) is unbound or mismatched against the payload `tenant_id`, increments `audit_malformed_records_total`, and logs only redacted metadata. In production, Kafka broker `WRITE` ACLs on `audit-compliance-records` enforce producer identity at the transport boundary.

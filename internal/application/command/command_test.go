@@ -166,7 +166,8 @@ func TestProcessKafkaBatch_EnforcesProducerTenantBinding(t *testing.T) {
 	records := []RawKafkaRecord{
 		{Partition: 0, Offset: 1, Value: makeAuditProtoBytes(t, "tenant-b", "prod-trusted", 1, `{"ok":false}`)},
 		{Partition: 0, Offset: 2, Value: makeAuditProtoBytes(t, "tenant-a", "prod-unknown", 1, `{"ok":false}`)},
-		{Partition: 0, Offset: 3, Value: makeAuditProtoBytes(t, "tenant-a", "prod-trusted", 1, `{"ok":true}`)},
+		{Partition: 0, Offset: 3, AuthenticatedPrincipal: "prod-other", Value: makeAuditProtoBytes(t, "tenant-a", "prod-trusted", 1, `{"ok":false}`)},
+		{Partition: 0, Offset: 4, AuthenticatedPrincipal: "prod-trusted", Value: makeAuditProtoBytes(t, "tenant-a", "prod-trusted", 1, `{"ok":true}`)},
 	}
 
 	if err := proc.Handle(context.Background(), records); err != nil {
@@ -181,6 +182,18 @@ func TestProcessKafkaBatch_EnforcesProducerTenantBinding(t *testing.T) {
 	}
 	if len(cold.entries) != 1 || len(cold.entries[0]) != 1 {
 		t.Fatalf("expected only 1 trusted entry in cold store, got %+v", cold.entries)
+	}
+
+	// Empty registry after SetProducerTenantBindings must fail closed (cannot bypass).
+	proc.SetProducerTenantBindings(map[string]string{})
+	if err := proc.Handle(context.Background(), records[3:4]); err != nil {
+		t.Fatalf("Handle empty registry: %v", err)
+	}
+	if err := proc.FlushAll(context.Background()); err != nil {
+		t.Fatalf("FlushAll empty registry: %v", err)
+	}
+	if len(hot.batches) != 1 || len(cold.entries) != 1 {
+		t.Fatalf("expected empty registry to reject record, got hot=%d cold=%d", len(hot.batches), len(cold.entries))
 	}
 }
 

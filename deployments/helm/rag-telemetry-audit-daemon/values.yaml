@@ -5,6 +5,9 @@ image:
   tag: "1.0.0"
   pullPolicy: IfNotPresent
 
+# Set imagePullSecrets (or configure GHCR_PULL_TOKEN in deploy.yml) if the GHCR package is private.
+imagePullSecrets: []
+
 serviceAccount:
   create: true
   name: ""
@@ -55,7 +58,6 @@ env:
   KAFKA_GROUP_ID: "rag-telemetry-audit-daemon"
   KAFKA_TLS: "true"
   KAFKA_SASL_MECHANISM: "PLAIN"
-  KAFKA_SASL_USERNAME: ""
   CLICKHOUSE_ADDR: "<service-id>.<region>.aws.clickhouse.cloud:9440"
   CLICKHOUSE_DATABASE: "default"
   CLICKHOUSE_USER: "default"

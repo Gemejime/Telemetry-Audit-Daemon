@@ -282,7 +282,7 @@ func scanCreditCard(src []byte, idx int) (end int, ok bool) {
 	for i < len(src) && nDigits < 19 {
 		b := src[i]
 		if isDigit(b) {
-			digits[nDigits] = b - '0'
+			digits[nDigits] = b - '0' // #nosec G602 -- nDigits is bounded to [0, 18] by loop condition
 			nDigits++
 			lastSep = false
 			i++
@@ -375,13 +375,14 @@ func scanPhone(src []byte, idx int) (end int, ok bool) {
 	digits := 0
 	hasSep := b0 == '+' || b0 == '('
 	lastSep := b0 == '+' || b0 == '('
-	if b0 == '+' {
+	switch b0 {
+	case '+':
 		i++
 		if i >= len(src) || !isDigit(src[i]) {
 			return 0, false
 		}
 		lastSep = false
-	} else if b0 == '(' {
+	case '(':
 		i++
 	}
 	for i < len(src) && digits < 15 && i-idx < maxPhoneScanLen {
@@ -402,7 +403,7 @@ func scanPhone(src []byte, idx int) (end int, ok bool) {
 				hasSep = true
 			}
 			// Reject consecutive formatting chars early except ") " / ")-" or " (".
-			if lastSep && !(src[i-1] == ')' && (b == ' ' || b == '-')) && !(src[i-1] == ' ' && b == '(') {
+			if lastSep && (src[i-1] != ')' || (b != ' ' && b != '-')) && (src[i-1] != ' ' || b != '(') {
 				break
 			}
 			// Do not consume trailing space/punctuation at end of number.

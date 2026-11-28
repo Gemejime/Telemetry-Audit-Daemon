@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -245,6 +246,9 @@ func parseProducerTenantBindings(raw string) (map[string]string, error) {
 			return nil, fmt.Errorf("expected producer_id=tenant_id entry, got %q", pair)
 		}
 		bindings[producerID] = tenantID
+	}
+	if len(bindings) == 0 {
+		return nil, errors.New("expected at least one producer_id=tenant_id binding")
 	}
 	return bindings, nil
 }

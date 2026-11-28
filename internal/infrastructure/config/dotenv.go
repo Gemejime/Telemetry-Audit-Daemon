@@ -63,7 +63,7 @@ func findDotEnvFromCWD() (string, bool) {
 }
 
 func loadFile(path string, failIfMissing bool) error {
-	f, err := os.Open(path) // #nosec G304 -- path is explicitly configured or resolved .env file
+	f, err := os.Open(path) // #nosec G304,G703 -- path is explicitly configured or resolved .env file
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) && !failIfMissing {
 			return nil

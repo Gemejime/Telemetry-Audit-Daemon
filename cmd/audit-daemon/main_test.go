@@ -42,4 +42,7 @@ func TestParseProducerTenantBindings(t *testing.T) {
 	if _, err := parseProducerTenantBindings("bad-entry"); err == nil {
 		t.Fatal("expected error for malformed binding")
 	}
+	if _, err := parseProducerTenantBindings(" , "); err == nil {
+		t.Fatal("expected error when binding config yields no entries")
+	}
 }
