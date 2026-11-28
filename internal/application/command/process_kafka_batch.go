@@ -35,15 +35,30 @@ type walEnvelope struct {
 // ProcessKafkaBatch decodes, validates, redacts in-flight, tracks sequence continuity,
 // dispatches to ClickHouse and S3 flushers, and spills to mmap_wal on downstream failures.
 type ProcessKafkaBatch struct {
-	redactor  *redaction.Engine
-	seqTrack  *entity.SequenceTracker
-	hot       *HotFlusher
-	cold      *ColdFlusher
-	hotStore  repository.HotStorePort
-	coldStore repository.ColdStorePort
-	wal       repository.WALPort
-	logger    *slog.Logger
-	metrics   *observability.Metrics
+	redactor        *redaction.Engine
+	seqTrack        *entity.SequenceTracker
+	hot             *HotFlusher
+	cold            *ColdFlusher
+	hotStore        repository.HotStorePort
+	coldStore       repository.ColdStorePort
+	wal             repository.WALPort
+	logger          *slog.Logger
+	metrics         *observability.Metrics
+	producerTenants map[string]string
+}
+
+// SetProducerTenantBindings configures a trusted producer_id -> tenant_id registry
+// enforced during batch ingestion before records reach either flusher.
+func (p *ProcessKafkaBatch) SetProducerTenantBindings(bindings map[string]string) {
+	if len(bindings) == 0 {
+		p.producerTenants = nil
+		return
+	}
+	cloned := make(map[string]string, len(bindings))
+	for k, v := range bindings {
+		cloned[k] = v
+	}
+	p.producerTenants = cloned
 }
 
 // NewProcessKafkaBatch constructs the compliance batch processor command handler.
@@ -115,6 +130,20 @@ func (p *ProcessKafkaBatch) Handle(ctx context.Context, records []RawKafkaRecord
 				slog.String("error", err.Error()),
 			)
 			continue
+		}
+
+		if len(p.producerTenants) > 0 {
+			expectedTenant, ok := p.producerTenants[entry.ProducerID]
+			if !ok || expectedTenant != entry.TenantID {
+				p.metrics.IncMalformedRecords(1)
+				p.logger.Warn("skipping audit record with untrusted producer-to-tenant binding",
+					slog.String("trace_id", entry.TraceID),
+					slog.String("producer_id", entry.ProducerID),
+					slog.Uint64("partition", uint64(rec.Partition)),
+					slog.Uint64("offset", rec.Offset),
+				)
+				continue
+			}
 		}
 
 		if len(entry.PayloadRedacted) > 0 {

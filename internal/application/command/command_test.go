@@ -150,6 +150,40 @@ func TestProcessKafkaBatch_RedactsPoisonPillsAndFlushes(t *testing.T) {
 	}
 }
 
+func TestProcessKafkaBatch_EnforcesProducerTenantBinding(t *testing.T) {
+	hot := &stubHotStore{}
+	cold := &stubColdStore{}
+	metrics := observability.NewMetrics()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	hotFlusher := NewHotFlusher(hot, 10, time.Second)
+	coldFlusher := NewColdFlusher(cold, 1024*1024, time.Minute, 2)
+	proc := NewProcessKafkaBatch(nil, nil, hotFlusher, coldFlusher, hot, cold, nil, logger, metrics)
+	proc.SetProducerTenantBindings(map[string]string{
+		"prod-trusted": "tenant-a",
+	})
+
+	records := []RawKafkaRecord{
+		{Partition: 0, Offset: 1, Value: makeAuditProtoBytes(t, "tenant-b", "prod-trusted", 1, `{"ok":false}`)},
+		{Partition: 0, Offset: 2, Value: makeAuditProtoBytes(t, "tenant-a", "prod-unknown", 1, `{"ok":false}`)},
+		{Partition: 0, Offset: 3, Value: makeAuditProtoBytes(t, "tenant-a", "prod-trusted", 1, `{"ok":true}`)},
+	}
+
+	if err := proc.Handle(context.Background(), records); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if err := proc.FlushAll(context.Background()); err != nil {
+		t.Fatalf("FlushAll: %v", err)
+	}
+
+	if len(hot.batches) != 1 || len(hot.batches[0]) != 1 {
+		t.Fatalf("expected only 1 trusted entry in hot store, got %+v", hot.batches)
+	}
+	if len(cold.entries) != 1 || len(cold.entries[0]) != 1 {
+		t.Fatalf("expected only 1 trusted entry in cold store, got %+v", cold.entries)
+	}
+}
+
 func TestProcessKafkaBatch_SpillsToWALAndRecovers(t *testing.T) {
 	hot := &stubHotStore{fail: true}
 	cold := &stubColdStore{}

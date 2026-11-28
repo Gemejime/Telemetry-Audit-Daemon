@@ -141,6 +141,9 @@ func NewConsumerGroup(cfg ConsumerConfig) (*ConsumerGroup, error) {
 		kgoOpts = append(kgoOpts, kgo.Dialer(tlsDialer.DialContext))
 	}
 	if cfg.SASLUsername != "" || cfg.SASLPassword != "" {
+		if !cfg.TLSEnabled {
+			return nil, errors.New("kafka SASL credentials require TLS (TLSEnabled=true)")
+		}
 		mech := strings.ToUpper(strings.TrimSpace(cfg.SASLMechanism))
 		if mech == "" || mech == "PLAIN" {
 			kgoOpts = append(kgoOpts, kgo.SASL(plain.Auth{

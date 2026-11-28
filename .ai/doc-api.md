@@ -186,3 +186,9 @@ ORDER BY (tenant_id, event_time, producer_id, kafka_partition, seq_id);
   - `event_id` (`BYTE_ARRAY/UTF8`), `trace_id` (`BYTE_ARRAY/UTF8`), `tenant_id` (`BYTE_ARRAY/UTF8`), `producer_id` (`BYTE_ARRAY/UTF8`), `kafka_partition` (`INT32`), `kafka_offset` (`INT64`), `seq_id` (`INT64` / `INT(64, false)`), `event_time_ms` (`INT64/TIMESTAMP_MILLIS`), `plane` (`INT32`), `action` (`BYTE_ARRAY/UTF8`), `service_name` (`BYTE_ARRAY/UTF8`), `actor_id` (`BYTE_ARRAY/UTF8`), `auth_method` (`BYTE_ARRAY/UTF8`), `source_ip_hash` (`BYTE_ARRAY/UTF8`), `doc_ids` (`LIST<INT32>` with `INT(32, false)` elements), `chunk_ids` (`LIST<BYTE_ARRAY>`), `document_versions` (`LIST<BYTE_ARRAY>`), `cache_hit` (`BOOLEAN`), `embedding_model_version` (`BYTE_ARRAY/UTF8`), `payload_redacted` (`BYTE_ARRAY`), `prompt_tokens` (`INT32` / `INT(32, false)`), `completion_tokens` (`INT32` / `INT(32, false)`).
 - **Parquet File Key-Value Metadata**:
   - `tenant_id`, `producer_id`, `kafka_partition`, `min_seq`, `max_seq`, `record_count`, `schema_version`
+
+---
+
+## Ingestion Configuration & Validation Notes
+
+- `PRODUCER_TENANT_BINDINGS` (optional CSV of `producer_id=tenant_id` pairs): when configured, `ProcessKafkaBatch` rejects records whose `producer_id` is unbound or mismatched against the payload `tenant_id`, increments `audit_malformed_records_total`, and logs only redacted metadata.

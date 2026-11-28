@@ -35,7 +35,7 @@ jobs:
         if: steps.go_check.outputs.has_go == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.x"
           cache: true
 
       - name: Verify gofmt -s formatting
@@ -54,7 +54,7 @@ jobs:
 
       - name: Run golangci-lint
         if: steps.go_check.outputs.has_go == 'true'
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: latest
 
@@ -92,7 +92,7 @@ jobs:
         if: steps.go_check.outputs.has_go == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.x"
           cache: true
 
       - name: Run govulncheck
@@ -246,7 +246,7 @@ jobs:
         if: steps.go_check.outputs.has_go == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.x"
           cache: true
 
       - name: Run unit & race-detector test suites

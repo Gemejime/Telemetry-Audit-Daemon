@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -51,7 +52,11 @@ func main() {
 	seqTracker := entity.NewSequenceTracker(entity.DefaultMaxTrackedStreams)
 
 	walDir := envOrDefault("WAL_DIR", "/var/lib/audit-daemon/wal")
-	walMaxBytes := envInt64OrDefault("WAL_MAX_BYTES", disk.DefaultMaxWALBytes)
+	walMaxBytes, err := envInt64OrDefault("WAL_MAX_BYTES", disk.DefaultMaxWALBytes)
+	if err != nil {
+		logger.Error("invalid environment configuration", slog.String("env", "WAL_MAX_BYTES"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	wal, err := disk.NewMmapWAL(walDir, walMaxBytes, disk.DefaultSegmentBytes, logger)
 	if err != nil {
 		logger.Error("failed to initialize mmap_wal", slog.String("error", err.Error()))
@@ -59,13 +64,23 @@ func main() {
 	}
 	defer func() { _ = wal.Close() }()
 
+	chTLS, err := envBoolOrDefault("CLICKHOUSE_TLS", false)
+	if err != nil {
+		logger.Error("invalid environment configuration", slog.String("env", "CLICKHOUSE_TLS"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	chTLSInsecure, err := envBoolOrDefault("CLICKHOUSE_TLS_INSECURE_SKIP_VERIFY", false)
+	if err != nil {
+		logger.Error("invalid environment configuration", slog.String("env", "CLICKHOUSE_TLS_INSECURE_SKIP_VERIFY"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	chClient, err := clickhouse.NewClient(clickhouse.Config{
 		Addr:                  splitCSV(envOrDefault("CLICKHOUSE_ADDR", "localhost:9000")),
 		Database:              envOrDefault("CLICKHOUSE_DATABASE", "default"),
 		Username:              envOrDefault("CLICKHOUSE_USER", "default"),
 		Password:              os.Getenv("CLICKHOUSE_PASSWORD"),
-		TLSEnabled:            envBoolOrDefault("CLICKHOUSE_TLS", false),
-		TLSInsecureSkipVerify: envBoolOrDefault("CLICKHOUSE_TLS_INSECURE_SKIP_VERIFY", false),
+		TLSEnabled:            chTLS,
+		TLSInsecureSkipVerify: chTLSInsecure,
 		Logger:                logger,
 	})
 	if err != nil {
@@ -79,13 +94,23 @@ func main() {
 	}
 	defer func() { _ = hotWriter.Close() }()
 
+	s3UsePathStyle, err := envBoolOrDefault("S3_USE_PATH_STYLE", false)
+	if err != nil {
+		logger.Error("invalid environment configuration", slog.String("env", "S3_USE_PATH_STYLE"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	s3RetentionYears, err := envIntOrDefault("S3_RETENTION_YEARS", s3.DefaultRetentionYears)
+	if err != nil {
+		logger.Error("invalid environment configuration", slog.String("env", "S3_RETENTION_YEARS"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	wormUploader, err := s3.NewWORMUploader(ctx, s3.Config{
 		Bucket:         envOrDefault("S3_BUCKET", "rag-audit-worm-vault"),
 		Region:         envOrDefault("S3_REGION", "us-east-1"),
 		Endpoint:       os.Getenv("S3_ENDPOINT"),
 		KMSKeyID:       os.Getenv("S3_KMS_KEY_ID"),
-		UsePathStyle:   envBoolOrDefault("S3_USE_PATH_STYLE", false),
-		RetentionYears: envIntOrDefault("S3_RETENTION_YEARS", s3.DefaultRetentionYears),
+		UsePathStyle:   s3UsePathStyle,
+		RetentionYears: s3RetentionYears,
 		Logger:         logger,
 		Metrics:        metrics,
 	})
@@ -98,13 +123,26 @@ func main() {
 	hotFlusher := command.NewHotFlusher(hotWriter, command.DefaultHotFlushRecords, command.DefaultHotFlushInterval)
 	coldFlusher := command.NewColdFlusher(wormUploader, command.DefaultColdFlushBytes, command.DefaultColdFlushInterval, command.DefaultColdUploadConcurrency)
 	processor := command.NewProcessKafkaBatch(redactor, seqTracker, hotFlusher, coldFlusher, hotWriter, wormUploader, wal, logger, metrics)
+	if rawBindings := os.Getenv("PRODUCER_TENANT_BINDINGS"); rawBindings != "" {
+		bindings, err := parseProducerTenantBindings(rawBindings)
+		if err != nil {
+			logger.Error("invalid environment configuration", slog.String("env", "PRODUCER_TENANT_BINDINGS"), slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		processor.SetProducerTenantBindings(bindings)
+	}
 	reconciler := query.NewReconcilePartitionGaps(hotWriter, wormUploader, logger, metrics)
 
+	kafkaTLS, err := envBoolOrDefault("KAFKA_TLS", false)
+	if err != nil {
+		logger.Error("invalid environment configuration", slog.String("env", "KAFKA_TLS"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	cg, err := kafka.NewConsumerGroup(kafka.ConsumerConfig{
 		Brokers:       splitCSV(envOrDefault("KAFKA_BROKERS", "localhost:9092")),
 		Topic:         envOrDefault("KAFKA_TOPIC", kafka.DefaultTopic),
 		GroupID:       envOrDefault("KAFKA_GROUP_ID", kafka.DefaultGroupID),
-		TLSEnabled:    envBoolOrDefault("KAFKA_TLS", false),
+		TLSEnabled:    kafkaTLS,
 		SASLMechanism: envOrDefault("KAFKA_SASL_MECHANISM", "PLAIN"),
 		SASLUsername:  os.Getenv("KAFKA_SASL_USERNAME"),
 		SASLPassword:  os.Getenv("KAFKA_SASL_PASSWORD"),
@@ -120,13 +158,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	reconcileRateLimit, err := envIntOrDefault("RECONCILE_RATE_LIMIT_PER_MIN", 30)
+	if err != nil {
+		logger.Error("invalid environment configuration", slog.String("env", "RECONCILE_RATE_LIMIT_PER_MIN"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	httpServer := transporthttp.NewServer(transporthttp.ServerConfig{
 		Addr:               envOrDefault("HTTP_ADDR", ":8080"),
 		MetricsAddr:        os.Getenv("METRICS_ADDR"),
 		AuthJWTSecret:      os.Getenv("AUTH_JWT_SECRET"),
 		AuthJWTAudience:    envOrDefault("AUTH_JWT_AUDIENCE", "rag-telemetry-audit-daemon"),
 		StaticAdminToken:   os.Getenv("STATIC_ADMIN_TOKEN"),
-		RateLimitPerMinute: envIntOrDefault("RECONCILE_RATE_LIMIT_PER_MIN", 30),
+		RateLimitPerMinute: reconcileRateLimit,
 		OpenAPISpecYAML:    openapi.SpecYAML,
 		HealthChecker:      &daemonReadiness{cg: cg, hotStore: hotWriter, wal: wal},
 		Reconciler:         reconciler,
@@ -159,31 +202,51 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-func envIntOrDefault(key string, def int) int {
+func envIntOrDefault(key string, def int) (int, error) {
 	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s: %w", key, err)
 		}
+		return n, nil
 	}
-	return def
+	return def, nil
 }
 
-func envInt64OrDefault(key string, def int64) int64 {
+func envInt64OrDefault(key string, def int64) (int64, error) {
 	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s: %w", key, err)
 		}
+		return n, nil
 	}
-	return def
+	return def, nil
 }
 
-func envBoolOrDefault(key string, def bool) bool {
+func envBoolOrDefault(key string, def bool) (bool, error) {
 	if v := os.Getenv(key); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return false, fmt.Errorf("parse %s: %w", key, err)
 		}
+		return b, nil
 	}
-	return def
+	return def, nil
+}
+
+func parseProducerTenantBindings(raw string) (map[string]string, error) {
+	bindings := make(map[string]string)
+	for _, pair := range splitCSV(raw) {
+		producerID, tenantID, ok := strings.Cut(pair, "=")
+		producerID = strings.TrimSpace(producerID)
+		tenantID = strings.TrimSpace(tenantID)
+		if !ok || producerID == "" || tenantID == "" {
+			return nil, fmt.Errorf("expected producer_id=tenant_id entry, got %q", pair)
+		}
+		bindings[producerID] = tenantID
+	}
+	return bindings, nil
 }
 
 func splitCSV(s string) []string {

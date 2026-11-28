@@ -5,6 +5,7 @@ info:
   description: >
     Internal HTTP API for Kubernetes liveness/readiness probes, Prometheus metrics,
     partition sequence reconciliation across ClickHouse and AWS S3 WORM, and OpenAPI documentation.
+    Ingestion enforces optional producer-to-tenant bindings before two-tier persistence.
 servers:
   - url: http://localhost:8080
     description: Internal Service / Cluster Ops
