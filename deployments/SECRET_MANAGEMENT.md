@@ -21,9 +21,11 @@ This document describes how non-sensitive configuration and sensitive credential
 
 | Key | Required | Purpose |
 | :--- | :--- | :--- |
-| `CLICKHOUSE_PASSWORD` | **Yes** | Native TCP authentication password for the ClickHouse hot tier. |
+| `CLICKHOUSE_PASSWORD` | **Yes** | Native TCP+TLS authentication password for ClickHouse Cloud. |
 | `AUTH_JWT_SECRET` | **Yes** | HMAC-SHA256 signing secret used to verify Bearer JWTs on `POST /v1/reconcile/gaps`. |
 | `STATIC_ADMIN_TOKEN` | Optional (`optional: true`) | Static admin Bearer token for `POST /v1/reconcile/gaps` when static token auth is enabled. |
+| `KAFKA_SASL_USERNAME` | Optional (`optional: true`) | Confluent Cloud SASL/PLAIN API key (required when `KAFKA_TLS=true` and `KAFKA_SASL_MECHANISM=PLAIN`). |
+| `KAFKA_SASL_PASSWORD` | Optional (`optional: true`) | Confluent Cloud SASL/PLAIN API secret. |
 
 > **Note on `S3_KMS_KEY_ID` and AWS Credentials**:
 > `scripts/sync_env_to_deployments.py` excludes any key containing `KEY` (`S3_KMS_KEY_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) from `values.yaml`.
@@ -41,9 +43,10 @@ The deployment workflow [`.github/workflows/deploy.yml`](../.github/workflows/de
 Configure these under **Settings $\rightarrow$ Environments $\rightarrow$ `production` (or `staging`) $\rightarrow$ Secrets**:
 
 - `KUBE_CONFIG_DATA`: Base64-encoded kubeconfig with permissions to manage Secrets and Helm releases in the target namespace (`base64 -w 0 ~/.kube/config`).
-- `CLICKHOUSE_PASSWORD`: ClickHouse writer password.
+- `CLICKHOUSE_PASSWORD`: ClickHouse Cloud password.
 - `AUTH_JWT_SECRET`: HMAC-SHA256 secret for admin/reconciliation JWTs.
 - `STATIC_ADMIN_TOKEN` *(optional)*: Static admin Bearer token if used.
+- `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` *(required for Confluent Cloud)*: Confluent Cloud API key & secret for `SASL_SSL`.
 
 ### How Injection Works
 
