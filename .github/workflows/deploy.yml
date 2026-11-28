@@ -94,6 +94,8 @@ jobs:
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
           AUTH_JWT_SECRET: ${{ secrets.AUTH_JWT_SECRET }}
           STATIC_ADMIN_TOKEN: ${{ secrets.STATIC_ADMIN_TOKEN }}
+          KAFKA_SASL_USERNAME: ${{ secrets.KAFKA_SASL_USERNAME }}
+          KAFKA_SASL_PASSWORD: ${{ secrets.KAFKA_SASL_PASSWORD }}
         run: |
           args=(
             create secret generic "$SECRET_NAME"
@@ -103,6 +105,12 @@ jobs:
           )
           if [ -n "$STATIC_ADMIN_TOKEN" ]; then
             args+=(--from-literal="STATIC_ADMIN_TOKEN=$STATIC_ADMIN_TOKEN")
+          fi
+          if [ -n "$KAFKA_SASL_USERNAME" ]; then
+            args+=(--from-literal="KAFKA_SASL_USERNAME=$KAFKA_SASL_USERNAME")
+          fi
+          if [ -n "$KAFKA_SASL_PASSWORD" ]; then
+            args+=(--from-literal="KAFKA_SASL_PASSWORD=$KAFKA_SASL_PASSWORD")
           fi
           kubectl "${args[@]}" --dry-run=client -o yaml | kubectl apply -f -
 

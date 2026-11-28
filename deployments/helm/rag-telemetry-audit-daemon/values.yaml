@@ -50,12 +50,15 @@ env:
   RECONCILE_RATE_LIMIT_PER_MIN: "30"
   WAL_DIR: "/var/lib/audit-daemon/wal"
   WAL_MAX_BYTES: "5368709120"
-  KAFKA_BROKERS: "kafka-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+  KAFKA_BROKERS: "<cluster-id>.<region>.aws.confluent.cloud:9092"
   KAFKA_TOPIC: "audit-compliance-records"
   KAFKA_GROUP_ID: "rag-telemetry-audit-daemon"
-  CLICKHOUSE_ADDR: "clickhouse-audit.clickhouse.svc.cluster.local:9000"
+  KAFKA_TLS: "true"
+  KAFKA_SASL_MECHANISM: "PLAIN"
+  KAFKA_SASL_USERNAME: ""
+  CLICKHOUSE_ADDR: "<service-id>.<region>.aws.clickhouse.cloud:9440"
   CLICKHOUSE_DATABASE: "default"
-  CLICKHOUSE_USER: "audit_writer"
+  CLICKHOUSE_USER: "default"
   CLICKHOUSE_TLS: "true"
   CLICKHOUSE_TLS_INSECURE_SKIP_VERIFY: "false"
   S3_BUCKET: "rag-audit-worm-vault"
@@ -91,9 +94,13 @@ networkPolicy:
   kafkaNamespaceSelector:
     kubernetes.io/metadata.name: kafka
   kafkaPort: 9092
+  kafkaEgressCIDRs:
+    - 0.0.0.0/0
   clickhouseNamespaceSelector:
     kubernetes.io/metadata.name: clickhouse
-  clickhousePort: 9000
+  clickhousePort: 9440
+  clickhouseEgressCIDRs:
+    - 0.0.0.0/0
   s3EgressCIDRs:
     - 0.0.0.0/0
 

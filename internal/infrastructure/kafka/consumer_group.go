@@ -2,16 +2,20 @@ package kafka
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/sasl/plain"
 
 	"rag-telemetry-audit-daemon/internal/application/command"
 	"rag-telemetry-audit-daemon/internal/domain/repository"
@@ -34,6 +38,10 @@ type ConsumerConfig struct {
 	Brokers           []string
 	Topic             string
 	GroupID           string
+	TLSEnabled        bool
+	SASLMechanism     string
+	SASLUsername      string
+	SASLPassword      string // #nosec G117 -- runtime credential injected via env/secret, never logged
 	WALDrainInterval  time.Duration
 	WALDrainBatch     int
 	LagReportInterval time.Duration
@@ -116,7 +124,7 @@ func NewConsumerGroup(cfg ConsumerConfig) (*ConsumerGroup, error) {
 		committedOffset:   make(map[int32]int64),
 	}
 
-	client, err := kgo.NewClient(
+	kgoOpts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ConsumerGroup(cfg.GroupID),
 		kgo.ConsumeTopics(cfg.Topic),
@@ -124,7 +132,27 @@ func NewConsumerGroup(cfg ConsumerConfig) (*ConsumerGroup, error) {
 		kgo.OnPartitionsAssigned(cg.onAssigned),
 		kgo.OnPartitionsRevoked(cg.onRevoked),
 		kgo.OnPartitionsLost(cg.onLost),
-	)
+	}
+	if cfg.TLSEnabled {
+		tlsDialer := &tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: 10 * time.Second},
+			Config:    &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+		kgoOpts = append(kgoOpts, kgo.Dialer(tlsDialer.DialContext))
+	}
+	if cfg.SASLUsername != "" || cfg.SASLPassword != "" {
+		mech := strings.ToUpper(strings.TrimSpace(cfg.SASLMechanism))
+		if mech == "" || mech == "PLAIN" {
+			kgoOpts = append(kgoOpts, kgo.SASL(plain.Auth{
+				User: cfg.SASLUsername,
+				Pass: cfg.SASLPassword,
+			}.AsMechanism()))
+		} else {
+			return nil, fmt.Errorf("unsupported kafka SASL mechanism %q", cfg.SASLMechanism)
+		}
+	}
+
+	client, err := kgo.NewClient(kgoOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create kafka consumer group: %w", err)
 	}

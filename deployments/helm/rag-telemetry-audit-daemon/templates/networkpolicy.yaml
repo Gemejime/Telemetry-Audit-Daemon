@@ -29,16 +29,30 @@ spec:
           port: {{ .Values.service.httpPort }}
   egress:
     - to:
+        {{- if .Values.networkPolicy.kafkaEgressCIDRs }}
+        {{- range .Values.networkPolicy.kafkaEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+        {{- else }}
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.kafkaNamespaceSelector | nindent 14 }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.kafkaPort }}
     - to:
+        {{- if .Values.networkPolicy.clickhouseEgressCIDRs }}
+        {{- range .Values.networkPolicy.clickhouseEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+        {{- else }}
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.clickhouseNamespaceSelector | nindent 14 }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.clickhousePort }}

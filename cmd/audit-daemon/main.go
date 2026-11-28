@@ -101,15 +101,19 @@ func main() {
 	reconciler := query.NewReconcilePartitionGaps(hotWriter, wormUploader, logger, metrics)
 
 	cg, err := kafka.NewConsumerGroup(kafka.ConsumerConfig{
-		Brokers:     splitCSV(envOrDefault("KAFKA_BROKERS", "localhost:9092")),
-		Topic:       envOrDefault("KAFKA_TOPIC", kafka.DefaultTopic),
-		GroupID:     envOrDefault("KAFKA_GROUP_ID", kafka.DefaultGroupID),
-		Processor:   processor,
-		HotFlusher:  hotFlusher,
-		ColdFlusher: coldFlusher,
-		WAL:         wal,
-		Logger:      logger,
-		Metrics:     metrics,
+		Brokers:       splitCSV(envOrDefault("KAFKA_BROKERS", "localhost:9092")),
+		Topic:         envOrDefault("KAFKA_TOPIC", kafka.DefaultTopic),
+		GroupID:       envOrDefault("KAFKA_GROUP_ID", kafka.DefaultGroupID),
+		TLSEnabled:    envBoolOrDefault("KAFKA_TLS", false),
+		SASLMechanism: envOrDefault("KAFKA_SASL_MECHANISM", "PLAIN"),
+		SASLUsername:  os.Getenv("KAFKA_SASL_USERNAME"),
+		SASLPassword:  os.Getenv("KAFKA_SASL_PASSWORD"),
+		Processor:     processor,
+		HotFlusher:    hotFlusher,
+		ColdFlusher:   coldFlusher,
+		WAL:           wal,
+		Logger:        logger,
+		Metrics:       metrics,
 	})
 	if err != nil {
 		logger.Error("failed to initialize kafka consumer group", slog.String("error", err.Error()))
