@@ -1,0 +1,84 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rag-telemetry-audit-daemon.fullname" . }}
+  labels:
+    {{- include "rag-telemetry-audit-daemon.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "rag-telemetry-audit-daemon.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.prometheusNamespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.metricsPort }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.adminNamespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.httpPort }}
+  egress:
+    - to:
+        {{- if .Values.networkPolicy.kafkaEgressCIDRs }}
+        {{- range .Values.networkPolicy.kafkaEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.kafkaNamespaceSelector | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.kafkaPort }}
+    - to:
+        {{- if .Values.networkPolicy.clickhouseEgressCIDRs }}
+        {{- range .Values.networkPolicy.clickhouseEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.clickhouseNamespaceSelector | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.clickhousePort }}
+    {{- if .Values.networkPolicy.s3EgressCIDRs }}
+    - to:
+        {{- range .Values.networkPolicy.s3EgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- if .Values.networkPolicy.awsCredentialEgressCIDRs }}
+    - to:
+        {{- range .Values.networkPolicy.awsCredentialEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 80
+    {{- end }}
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

@@ -1,0 +1,22 @@
+# Canary rollout override: deploys 1 replica sharing the production consumer group
+# ("rag-telemetry-audit-daemon") on a subset of Kafka partitions.
+#
+# Cutover Gates (must hold for >= 15m before scaling canary / rolling stable):
+#   1. Zero HotPersistSLOBreach alerts (P99 audit_hot_persist_duration_seconds <= 2.0s)
+#   2. Zero MissingSequenceGap alerts (rate(audit_sequence_gaps_total[5m]) == 0)
+#   3. audit_wal_spillover_active == 0
+#   4. audit_consumer_lag_records draining monotonically
+
+replicaCount: 1
+
+canary:
+  enabled: true
+
+autoscaling:
+  enabled: false
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+  rollout.rag-platform.io/track: "canary"

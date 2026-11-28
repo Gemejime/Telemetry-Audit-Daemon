@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rag-telemetry-audit-daemon
+description: Horizontally scalable, memory-bounded compliance audit and telemetry daemon for the disaggregated RAG platform.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

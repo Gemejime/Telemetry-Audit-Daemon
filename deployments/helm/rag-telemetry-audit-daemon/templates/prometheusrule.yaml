@@ -1,0 +1,47 @@
+{{- if .Values.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "rag-telemetry-audit-daemon.fullname" . }}
+  labels:
+    {{- include "rag-telemetry-audit-daemon.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: rag-telemetry-audit-daemon.rules
+      rules:
+        - alert: HighConsumerLag
+          expr: audit_consumer_lag_records > 15000
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Kafka consumer lag exceeds 15,000 records"
+            description: "audit_consumer_lag_records has been above 15,000 for more than 3 minutes."
+        - alert: HotPersistSLOBreach
+          expr: histogram_quantile(0.99, sum(rate(audit_hot_persist_duration_seconds_bucket[5m])) by (le, instance)) > 2.0
+          for: 2m
+          labels:
+            severity: page
+          annotations:
+            summary: "ClickHouse hot persist P99 latency exceeds 2.0s SLO"
+            description: "P99 audit_hot_persist_duration_seconds has exceeded 2.0 seconds for more than 2 minutes."
+        - alert: ActiveDiskSpillover
+          expr: audit_wal_spillover_active == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Local NVMe mmap_wal spillover active for > 5 minutes"
+            description: "Downstream ClickHouse or S3 outage is causing records to spool to mmap_wal."
+        - alert: MissingSequenceGap
+          expr: increase(audit_sequence_gaps_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: page
+          annotations:
+            summary: "Partition sequence gap detected in compliance ledger"
+            description: "audit_sequence_gaps_total incremented; run ledger-verify or POST /v1/reconcile/gaps."
+{{- end }}

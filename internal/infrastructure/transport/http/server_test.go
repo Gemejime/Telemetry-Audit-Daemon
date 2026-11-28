@@ -1,0 +1,305 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"rag-telemetry-audit-daemon/internal/application/query"
+	"rag-telemetry-audit-daemon/internal/domain/entity"
+	"rag-telemetry-audit-daemon/internal/domain/repository"
+	"rag-telemetry-audit-daemon/internal/infrastructure/observability"
+)
+
+type stubReadiness struct {
+	draining bool
+	kafkaOK  bool
+	chErr    error
+	wal      bool
+}
+
+func (s *stubReadiness) IsDraining() bool                       { return s.draining }
+func (s *stubReadiness) IsKafkaHealthy() bool                   { return s.kafkaOK }
+func (s *stubReadiness) PingClickHouse(_ context.Context) error { return s.chErr }
+func (s *stubReadiness) IsWALSpilloverActive() bool             { return s.wal }
+
+type stubHot struct{}
+
+func (stubHot) WriteBatch(_ context.Context, _ []entity.ComplianceEntry) error { return nil }
+func (stubHot) QuerySequenceRanges(_ context.Context, _ string, _ uint16, _, _ uint64) ([]repository.SequenceRange, error) {
+	return []repository.SequenceRange{{ProducerID: "p1", MinSeq: 100, MaxSeq: 105}}, nil
+}
+func (stubHot) Ping(_ context.Context) error { return nil }
+func (stubHot) Close() error                 { return nil }
+
+type stubCold struct{}
+
+func (stubCold) WriteBatch(_ context.Context, _ entity.BatchManifest, _ []entity.ComplianceEntry) error {
+	return nil
+}
+func (stubCold) ListManifests(_ context.Context, _ string, _ uint16, _, _ uint64) ([]repository.ColdObjectManifest, error) {
+	return []repository.ColdObjectManifest{{Key: "k1", ProducerID: "p1", MinSeq: 100, MaxSeq: 104}}, nil
+}
+func (stubCold) Close() error { return nil }
+
+func int64Ptr(v int64) *int64 { return &v }
+
+func signTestJWT(t *testing.T, secret string, claims authClaims) string {
+	t.Helper()
+	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payloadBytes, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(hdr + "." + payload))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return hdr + "." + payload + "." + sig
+}
+
+func TestHealthReadyMetricsAndDocs(t *testing.T) {
+	metrics := observability.NewMetrics()
+	metrics.IncRecordsConsumed("tenant-1", 5)
+
+	rc := &stubReadiness{kafkaOK: true}
+	srv := NewServer(ServerConfig{
+		OpenAPISpecYAML: []byte("openapi: 3.1.0\n"),
+		HealthChecker:   rc,
+		Metrics:         metrics,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 /healthz, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 /ready, got %d", rec.Code)
+	}
+
+	rc.draining = true
+	req = httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 /ready when draining, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "audit_records_consumed_total") {
+		t.Fatalf("unexpected /metrics response: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "3.1.0") {
+		t.Fatalf("unexpected /openapi.yaml response: %d", rec.Code)
+	}
+}
+
+func TestReconcileGapsEndpoint_AuthTenantIsolationAndRateLimit(t *testing.T) {
+	const secret = "test-hmac-secret-key"
+	metrics := observability.NewMetrics()
+	reconciler := query.NewReconcilePartitionGaps(stubHot{}, stubCold{}, nil, metrics)
+
+	srv := NewServer(ServerConfig{
+		AuthJWTSecret:      secret,
+		AuthJWTAudience:    "rag-telemetry-audit-daemon",
+		RateLimitPerMinute: 4,
+		Reconciler:         reconciler,
+		Metrics:            metrics,
+	})
+
+	body := `{"tenant_id":"tenant-corp-01","partition":3,"from_seq":"100","to_seq":"105"}`
+
+	// 1. Missing token -> 401
+	req := httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+
+	// 2. Wrong tenant -> 403
+	wrongTenantToken := signTestJWT(t, secret, authClaims{
+		Scope:    "audit:reconcile",
+		TenantID: "tenant-other",
+		Exp:      int64Ptr(time.Now().Add(time.Hour).Unix()),
+	})
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+wrongTenantToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for tenant mismatch, got %d", rec.Code)
+	}
+
+	// 3. Valid token -> 200 with 1 gap in s3 (seq 105)
+	validToken := signTestJWT(t, secret, authClaims{
+		Scope:    "audit:reconcile",
+		TenantID: "tenant-corp-01",
+		Aud:      jwtAudience{"rag-telemetry-audit-daemon"},
+		Exp:      int64Ptr(time.Now().Add(time.Hour).Unix()),
+	})
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+validToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Request-ID") == "" {
+		t.Fatal("expected X-Request-ID header")
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"inconsistent"`) || !strings.Contains(rec.Body.String(), `"missing_in":"s3"`) {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+
+	// 4. Exhaust rate limit (capacity 4, 3 used above -> 1 more succeeds, next returns 429)
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+validToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 4th request to pass, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+validToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on 5th request, got %d", rec.Code)
+	}
+}
+
+func TestDedicatedMetricsPortIsolation(t *testing.T) {
+	metrics := observability.NewMetrics()
+	metrics.IncSequenceGaps(2)
+
+	srv := NewServer(ServerConfig{
+		Addr:          ":8080",
+		MetricsAddr:   ":9090",
+		HealthChecker: &stubReadiness{kafkaOK: true},
+		Metrics:       metrics,
+	})
+
+	// Main admin/probe handler must NOT expose /metrics when MetricsAddr is configured.
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for /metrics on main port when MetricsAddr is set, got %d", rec.Code)
+	}
+
+	// Dedicated metrics handler must serve /metrics including audit_sequence_gaps_total.
+	if srv.MetricsHandler() == nil {
+		t.Fatal("expected non-nil MetricsHandler")
+	}
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec = httptest.NewRecorder()
+	srv.MetricsHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on dedicated metrics port, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "audit_sequence_gaps_total 2") {
+		t.Fatalf("expected audit_sequence_gaps_total 2 in metrics output, got: %s", rec.Body.String())
+	}
+}
+
+func TestReconcileGapsEndpoint_JWTAudienceExpirationAndStrictBody(t *testing.T) {
+	const secret = "test-hmac-secret-key"
+	const aud = "rag-telemetry-audit-daemon"
+	metrics := observability.NewMetrics()
+	reconciler := query.NewReconcilePartitionGaps(stubHot{}, stubCold{}, nil, metrics)
+
+	srv := NewServer(ServerConfig{
+		AuthJWTSecret:      secret,
+		AuthJWTAudience:    aud,
+		RateLimitPerMinute: 20,
+		Reconciler:         reconciler,
+		Metrics:            metrics,
+	})
+
+	validBody := `{"tenant_id":"tenant-corp-01","partition":3,"from_seq":"100","to_seq":"105"}`
+
+	// exp: 0 must be rejected as expired (distinct from absent exp).
+	expZeroToken := signTestJWT(t, secret, authClaims{
+		Scope:    "audit:reconcile",
+		TenantID: "tenant-corp-01",
+		Aud:      jwtAudience{aud},
+		Exp:      int64Ptr(0),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(validBody))
+	req.Header.Set("Authorization", "Bearer "+expZeroToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for exp=0, got %d", rec.Code)
+	}
+
+	// Absent exp is accepted when aud matches (array form).
+	noExpArrayAudToken := signTestJWT(t, secret, authClaims{
+		Scope:    "audit:reconcile",
+		TenantID: "tenant-corp-01",
+		Aud:      jwtAudience{"other-svc", aud},
+	})
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(validBody+"  \n"))
+	req.Header.Set("Authorization", "Bearer "+noExpArrayAudToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for absent exp + matching array aud + trailing whitespace, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Mismatched aud must be rejected.
+	wrongAudToken := signTestJWT(t, secret, authClaims{
+		Scope:    "audit:reconcile",
+		TenantID: "tenant-corp-01",
+		Aud:      jwtAudience{"wrong-audience"},
+		Exp:      int64Ptr(time.Now().Add(time.Hour).Unix()),
+	})
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(validBody))
+	req.Header.Set("Authorization", "Bearer "+wrongAudToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for mismatched aud, got %d", rec.Code)
+	}
+
+	// Second JSON value after first object must be rejected.
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(validBody+`{"extra":true}`))
+	req.Header.Set("Authorization", "Bearer "+noExpArrayAudToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for trailing JSON value, got %d", rec.Code)
+	}
+
+	// Oversized request body (> 64 KiB) must be rejected.
+	oversized := `{"tenant_id":"` + strings.Repeat("a", 65*1024) + `","partition":3,"from_seq":"100","to_seq":"105"}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/reconcile/gaps", bytes.NewBufferString(oversized))
+	req.Header.Set("Authorization", "Bearer "+noExpArrayAudToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized body, got %d", rec.Code)
+	}
+}

@@ -1,0 +1,42 @@
+# Task & planning specification PDFs (excluded from version control)
+tasks/
+
+# Go build & test artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+*.prof
+*.pprof
+vendor/
+
+# Local WAL spillover, Parquet scratch, & temp files
+*.wal
+*.mmap
+*.parquet
+tmp/
+temp/
+
+# Environment variables & local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# IDE & OS metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
